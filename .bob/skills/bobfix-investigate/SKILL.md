@@ -18,6 +18,18 @@ integrations, jobs, tests and how they run)
 and the entry points relevant to the bug.
 </Step>
 <Step>
+Reproduce first — before any hypothesis. Using ONLY the bug report and the
+repository's existing test setup, write ONE reproduction test that drives the
+system through its public interface (HTTP endpoint, CLI, UI component, public
+function) and asserts the behaviour the user expects. It must not encode any
+guess about the cause. Put it in the repo's test folder under a `repro/`
+subfolder. Run it: it MUST fail on the current code. If it passes, the bug is not
+reproduced: adjust the scenario (not the assertion about user-visible behaviour)
+up to 3 times; if it still passes, record that in `bug.json` and continue.
+Record in `bug.json`: `repro_test: { path, sha256 }` (`sha256sum <path>`) and the
+failing output. This test is frozen: nobody edits it afterwards.
+</Step>
+<Step>
 Choose THREE investigation scopes from `map.json`, following `subagent-briefs.md`,
 and record them in `map.json` (name, prefix, paths, why this scope is on the
 path of the bug). Then spawn exactly THREE explore subagents IN PARALLEL, in a

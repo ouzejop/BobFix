@@ -12,6 +12,10 @@ commit as `base_ref` (`git rev-parse HEAD`) — this is the buggy version.
 Refuse to continue if the working tree has uncommitted changes outside `.bobfix/`.
 </Step>
 <Step>
+Read `repro_test` in `bug.json`. That frozen reproduction test must pass after
+your fix; you must never modify, move or delete it. `verify.mjs` checks its hash.
+</Step>
+<Step>
 Write the regression test first, following `regression_test_idea`. Run it
 alone. It MUST fail on the current code. If it passes, the test does not
 reproduce the bug: rewrite it. Save the failing output to `before.txt`.

@@ -16,6 +16,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { dirname, join, relative } from "node:path";
 
 const args = Object.fromEntries(
@@ -36,6 +37,15 @@ const headSha = git("rev-parse", "HEAD");
 const runDir = join(root, ".bobfix", "runs", args.run);
 mkdirSync(runDir, { recursive: true });
 const scratch = mkdtempSync(join(tmpdir(), "bobfix-"));
+
+// Frozen reproduction test written from the bug report before any diagnosis
+// (.bobfix/runs/<run>/bug.json → repro_test: { path, sha256 }). Mandatory when present.
+const sha = (f) => createHash("sha256").update(readFileSync(f)).digest("hex");
+let repro = null;
+try {
+  repro = JSON.parse(readFileSync(join(runDir, "bug.json"), "utf8")).repro_test ?? null;
+} catch {}
+const reproIntact = repro ? existsSync(join(root, repro.path)) && sha(join(root, repro.path)) === repro.sha256 : null;
 
 function vitest(cwd, testFile, label) {
   if (args.cmd) return generic(cwd, testFile, label);
@@ -85,10 +95,16 @@ function generic(cwd, testFile, label) {
 const wt = join(scratch, "base");
 git("worktree", "add", "--detach", wt, baseSha);
 let before;
+let reproBefore = null;
 try {
   const dest = join(wt, args.test);
   mkdirSync(dirname(dest), { recursive: true });
   copyFileSync(join(root, args.test), dest);
+  if (repro && reproIntact) {
+    const rdest = join(wt, repro.path);
+    mkdirSync(dirname(rdest), { recursive: true });
+    copyFileSync(join(root, repro.path), rdest);
+  }
   // link node_modules of every directory from the repo root down to the app (npm workspaces hoist them)
   const parts = appRel.split("/").filter((s) => s && s !== ".");
   const dirs = ["."].concat(parts.map((_, i) => parts.slice(0, i + 1).join("/")));
@@ -98,12 +114,14 @@ try {
     if (existsSync(src) && !existsSync(dst)) symlinkSync(src, dst, "dir");
   }
   before = vitest(join(wt, appRel), relative(appRel, args.test), "before");
+  if (repro && reproIntact) reproBefore = vitest(join(wt, appRel), relative(appRel, repro.path), "repro-before");
 } finally {
   git("worktree", "remove", "--force", wt);
 }
 
 // 2. Fixed commit, regression test alone → must pass
 const after = vitest(join(root, appRel), relative(appRel, args.test), "after");
+const reproAfter = repro && reproIntact ? vitest(join(root, appRel), relative(appRel, repro.path), "repro-after") : null;
 // 3. Fixed commit, full suite → must pass
 const suite = vitest(join(root, appRel), null, "suite");
 // 4. Optional build
@@ -120,6 +138,11 @@ const checks = {
   full_suite_passes: suite.ran && suite.exit_code === 0 && suite.failed === 0,
   build_ok: build.skipped || build.ok,
 };
+if (repro) {
+  checks.repro_test_unmodified = reproIntact === true;
+  checks.repro_fails_before_fix = !!reproBefore && reproBefore.ran && reproBefore.exit_code !== 0 && reproBefore.failed !== 0;
+  checks.repro_passes_after_fix = !!reproAfter && reproAfter.ran && reproAfter.exit_code === 0 && reproAfter.failed === 0;
+}
 const result = {
   run_id: args.run,
   runner: args.cmd ?? "vitest (json reporter)",
@@ -127,7 +150,8 @@ const result = {
   fixed_ref: headSha,
   regression_test: args.test,
   verified_at: new Date().toISOString(),
-  runs: { before, after, suite, build },
+  repro_test: repro,
+  runs: { before, after, suite, build, repro_before: reproBefore, repro_after: reproAfter },
   checks,
   status: Object.values(checks).every(Boolean) ? "VERIFIED" : "NOT_VERIFIED",
 };
@@ -138,6 +162,11 @@ const mark = (b) => (b ? "✓" : "✗");
 console.log(`${mark(checks.bug_reproduced_before_fix)} Bug reproduced before fix   (${before.failed ?? "?"}/${before.total ?? "?"} failing)`);
 console.log(`${mark(checks.regression_test_passes_after_fix)} Regression test after fix   (${after.passed ?? "?"}/${after.total ?? "?"} passing)`);
 console.log(`${mark(checks.full_suite_passes)} Full suite                  (${suite.passed ?? "?"}/${suite.total ?? "?"} passing)`);
+if (repro) {
+  console.log(`${mark(checks.repro_test_unmodified)} Repro test unmodified       (${repro.path})`);
+  console.log(`${mark(checks.repro_fails_before_fix)} Repro test fails before fix`);
+  console.log(`${mark(checks.repro_passes_after_fix)} Repro test passes after fix`);
+}
 console.log(`${mark(checks.build_ok)} Build${build.skipped ? " (skipped)" : ""}`);
 console.log(`\nSTATUS: ${result.status}`);
 process.exit(result.status === "VERIFIED" ? 0 : 1);

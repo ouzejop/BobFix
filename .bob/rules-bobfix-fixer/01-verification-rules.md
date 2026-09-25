@@ -7,3 +7,5 @@
 4. Never edit `verification.json`, never skip, delete or weaken existing tests
    to make the suite pass.
 5. If verification fails, report the failure exactly as recorded and stop.
+6. Never modify, move or delete the frozen reproduction test (`repro_test` in
+   bug.json). A fix that does not make it pass is not a fix.

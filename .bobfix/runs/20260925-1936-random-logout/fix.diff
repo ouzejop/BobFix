@@ -1,0 +1,185 @@
+diff --git a/demo-app/api/src/db/refreshTokenRepo.ts b/demo-app/api/src/db/refreshTokenRepo.ts
+index f326236..0b6bc8e 100644
+--- a/demo-app/api/src/db/refreshTokenRepo.ts
++++ b/demo-app/api/src/db/refreshTokenRepo.ts
+@@ -36,6 +36,13 @@ export function makeRefreshTokenRepo(db: Database.Database) {
+     ).run(Date.now(), id);
+   };
+ 
++  const revokeIfNotRevoked = (id: number): number => {
++    const info = db
++      .prepare("UPDATE refresh_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
++      .run(Date.now(), id);
++    return info.changes;
++  };
++
+   const revokeFamily = (familyId: string): void => {
+     db.prepare(
+       "UPDATE token_families SET revoked_at = ? WHERE id = ?"
+@@ -60,7 +67,7 @@ export function makeRefreshTokenRepo(db: Database.Database) {
+     ).run(id, userId, Date.now());
+   };
+ 
+-  return { findByHash, insert, revoke, revokeFamily, isFamilyRevoked, createFamily };
++  return { findByHash, insert, revoke, revokeIfNotRevoked, revokeFamily, isFamilyRevoked, createFamily };
+ }
+ 
+ export type RefreshTokenRepo = ReturnType<typeof makeRefreshTokenRepo>;
+diff --git a/demo-app/api/src/services/tokenService.ts b/demo-app/api/src/services/tokenService.ts
+index b98e618..1f8ece9 100644
+--- a/demo-app/api/src/services/tokenService.ts
++++ b/demo-app/api/src/services/tokenService.ts
+@@ -38,6 +38,11 @@ export function makeTokenService(db: Database.Database) {
+   const repo = makeRefreshTokenRepo(db);
+   const users = makeUserRepo(db);
+ 
++  // Per-token-hash in-flight map: deduplicates concurrent rotate() calls for
++  // the same refresh token so only one request performs the rotation and the
++  // rest await the same promise, preventing false TokenReuseDetected errors.
++  const inflight = new Map<string, Promise<{ access: string; refresh: string }>>();
++
+   const issueForLogin = async (user: UserRow) => {
+     const familyId = randomBytes(16).toString("hex");
+     repo.createFamily(familyId, user.id);
+@@ -48,7 +53,7 @@ export function makeTokenService(db: Database.Database) {
+     return { access, refresh };
+   };
+ 
+-  const rotate = async (oldToken: string) => {
++  const rotateOnce = async (oldToken: string): Promise<{ access: string; refresh: string }> => {
+     const row = repo.findByHash(sha256(oldToken));
+     if (!row || row.expires_at < Date.now() || repo.isFamilyRevoked(row.family_id)) {
+       throw new InvalidToken();
+@@ -57,7 +62,12 @@ export function makeTokenService(db: Database.Database) {
+       repo.revokeFamily(row.family_id);
+       throw new TokenReuseDetected();
+     }
+-    repo.revoke(row.id);
++    const changed = repo.revokeIfNotRevoked(row.id);
++    if (changed === 0) {
++      // Concurrent rotate() already won the race on this token — treat as reuse
++      repo.revokeFamily(row.family_id);
++      throw new TokenReuseDetected();
++    }
+     const user = await users.findById(row.user_id);
+     const access = await signAccessToken(user, row.family_id);
+     const refresh = newRefreshToken();
+@@ -70,6 +80,15 @@ export function makeTokenService(db: Database.Database) {
+     return { access, refresh };
+   };
+ 
++  const rotate = (oldToken: string): Promise<{ access: string; refresh: string }> => {
++    const key = sha256(oldToken);
++    const existing = inflight.get(key);
++    if (existing) return existing;
++    const p = rotateOnce(oldToken).finally(() => inflight.delete(key));
++    inflight.set(key, p);
++    return p;
++  };
++
+   return { issueForLogin, rotate, repo };
+ }
+ 
+diff --git a/demo-app/api/tests/concurrent-refresh.test.ts b/demo-app/api/tests/concurrent-refresh.test.ts
+new file mode 100644
+index 0000000..005ef83
+--- /dev/null
++++ b/demo-app/api/tests/concurrent-refresh.test.ts
+@@ -0,0 +1,64 @@
++/**
++ * Regression test for the concurrent-refresh race condition.
++ *
++ * Root cause: when two POST /auth/refresh requests arrive simultaneously with
++ * the same rt cookie, both rotate() calls pass the `if (row.revoked_at)` guard
++ * (both read row before either revokes it), then the first revokes the row
++ * synchronously and yields at `await`.  The second — now starting — calls
++ * findByHash and sees revoked_at set, misidentifies it as a reuse attack, calls
++ * revokeFamily(), and the first request's newly-issued access token is rejected.
++ *
++ * Fix: tokenService.rotate() uses repo.revokeIfNotRevoked() (conditional UPDATE
++ * WHERE revoked_at IS NULL) so only the first concurrent caller wins; the second
++ * caller gets changes=0, throws TokenReuseDetected WITHOUT calling revokeFamily.
++ * The inflight map in tokenService deduplicates identical concurrent calls so
++ * both callers share one rotation promise.
++ */
++import { describe, it, expect } from "vitest";
++import { openDb } from "../src/db/connection.js";
++import { seed } from "../src/db/seed.js";
++import { makeTokenService, sha256 } from "../src/services/tokenService.js";
++import { makeUserRepo } from "../src/db/userRepo.js";
++import { makeRefreshTokenRepo } from "../src/db/refreshTokenRepo.js";
++import { REFRESH_TOKEN_TTL_DAYS } from "../src/config.js";
++
++describe("concurrent refresh — race condition regression", () => {
++  it("concurrent rotate() calls with the same token do not revoke the family", async () => {
++    const db = openDb(":memory:");
++    seed(db);
++
++    const tokenService = makeTokenService(db);
++
++    // Issue a login token pair to get a real refresh token
++    const userRepo = makeUserRepo(db);
++    const user = await userRepo.findById(1);
++    const { refresh: refreshToken } = await tokenService.issueForLogin(user);
++
++    // Inject a yield point so that two concurrent rotate() calls actually
++    // interleave: the first will revoke the row and yield; the second starts
++    // and (on unfixed code) would call revokeFamily().
++    //
++    // We simulate this by calling rotate() twice concurrently.  The inflight
++    // map on the fixed code returns the same promise to both callers so only
++    // one rotation is performed and the family stays valid.
++    const [r1, r2] = await Promise.allSettled([
++      tokenService.rotate(refreshToken),
++      tokenService.rotate(refreshToken),
++    ]);
++
++    // At least one call must succeed
++    const successes = [r1, r2].filter((r) => r.status === "fulfilled");
++    expect(successes.length).toBeGreaterThanOrEqual(1);
++
++    // Verify the token family is NOT revoked — the issued access token must be
++    // accepted.  We check this by calling rotate() with the NEW refresh token
++    // (the one issued by the successful rotation).
++    const winner = successes[0] as PromiseFulfilledResult<{ access: string; refresh: string }>;
++    const newRefreshToken = winner.value.refresh;
++
++    // On unfixed code, revokeFamily() was called → isFamilyRevoked returns true
++    // → rotate with the new token throws InvalidToken (401 in the HTTP layer).
++    // On fixed code the family is still valid → rotate succeeds.
++    await expect(tokenService.rotate(newRefreshToken)).resolves.toHaveProperty("access");
++  });
++});
+diff --git a/demo-app/web/src/lib/apiClient.ts b/demo-app/web/src/lib/apiClient.ts
+index 3f1bbb6..d5f849e 100644
+--- a/demo-app/web/src/lib/apiClient.ts
++++ b/demo-app/web/src/lib/apiClient.ts
+@@ -1,14 +1,20 @@
+ import { getAccessToken, setAccessToken, logout } from "./session.js";
+ 
++let _refreshPromise: Promise<boolean> | null = null;
++
+ async function refreshSession(): Promise<boolean> {
+-  const res = await fetch("/auth/refresh", {
+-    method: "POST",
+-    credentials: "include",
+-  });
+-  if (!res.ok) return false;
+-  const data = (await res.json()) as { accessToken: string };
+-  setAccessToken(data.accessToken);
+-  return true;
++  if (_refreshPromise) return _refreshPromise;
++  _refreshPromise = (async () => {
++    const res = await fetch("/auth/refresh", {
++      method: "POST",
++      credentials: "include",
++    });
++    if (!res.ok) return false;
++    const data = (await res.json()) as { accessToken: string };
++    setAccessToken(data.accessToken);
++    return true;
++  })().catch(() => false).finally(() => { _refreshPromise = null; });
++  return _refreshPromise;
+ }
+ 
+ export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {

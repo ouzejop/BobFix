@@ -1,6 +1,7 @@
 # BobFix Investigator — non-negotiable rules
 
-1. Never write or modify source code. Only files under `.bobfix/`.
+1. Never write or modify product code. You may only write under `.bobfix/`
+   and the reproduction test (a test file under a `repro/` folder).
 2. Always investigate with exactly three explore subagents launched in parallel,
    one per scope chosen from map.json. Do not replace them by reading the code yourself.
 3. Evidence is an exact quote from a file with its path and line range.

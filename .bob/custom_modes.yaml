@@ -22,8 +22,8 @@ customModes:
       - todo
       - subagent
       - - edit
-        - fileRegex: "^\\.bobfix/.*"
-          description: Investigation evidence files only
+        - fileRegex: "^\\.bobfix/|(^|/)repro/[^/]+$"
+          description: Evidence files and the reproduction test only
     allowedSubagents:
       - explore
 
