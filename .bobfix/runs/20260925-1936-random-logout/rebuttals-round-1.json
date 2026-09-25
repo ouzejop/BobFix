@@ -1,0 +1,35 @@
+{
+  "round": 1,
+  "rebuttals": [
+    {
+      "challenge_id": "S1",
+      "verdict": "accepted",
+      "reasoning": "Confirmed by code: `let _accessToken: string | null = null` (session.ts:1) is module-scoped per JavaScript execution context. Each browser tab is a separate context with its own `_accessToken` variable and its own in-flight promise variable. Two tabs that both have an expired access token and both load the Dashboard will each fire their own POST /auth/refresh with the same rt cookie, producing exactly the same server-side race described in the root cause. The fix direction (client-side deduplication) only covers within-tab concurrency; cross-tab concurrency remains. This is a true gap. The fix direction will be updated to note this residual risk and that a correct solution must also handle it.",
+      "code_checked": "demo-app/web/src/lib/session.ts:1"
+    },
+    {
+      "challenge_id": "S2",
+      "verdict": "accepted",
+      "reasoning": "Confirmed by code: `refreshSession()` is a module-level function with no state. After the fix adds an in-flight promise variable, there is nothing in the current code that clears it. If the promise is never reset after resolution, the next time the new access token expires mid-session and the user gets another 401, `api()` would await the stale resolved promise and never fire a new POST /auth/refresh. The fix direction must explicitly state that the in-flight promise is cleared (set to null) once it settles, so subsequent calls create a fresh promise. Accepting this challenge.",
+      "code_checked": "demo-app/web/src/lib/apiClient.ts:3-12"
+    },
+    {
+      "challenge_id": "S3",
+      "verdict": "accepted",
+      "reasoning": "Confirmed: demo-app/web/package.json has no test runner — only vite and tsc. The api tests use vitest+supertest (server-side only). A regression test that exercises the concurrent client-side api() calls would require adding a client-side test framework. However, the race is fully reproducible at the server level: two simultaneous POST /auth/refresh requests with the same token using supertest against the existing Express app is enough to reproduce the bug and would fail under current code. The regression test idea will be rewritten to use the existing api vitest+supertest setup, not the client layer.",
+      "code_checked": "demo-app/web/package.json:1-21, demo-app/api/package.json:17-28"
+    },
+    {
+      "challenge_id": "S4",
+      "verdict": "accepted",
+      "reasoning": "This is a more precise restatement of S2 — both identify the same missing lifecycle specification for the in-flight promise. The fix direction change already triggered by accepting S2 (explicitly state the promise must be cleared after settlement) also fully addresses S4. No further revision needed beyond what S2 already triggers.",
+      "code_checked": "demo-app/web/src/lib/apiClient.ts:25-26"
+    }
+  ],
+  "draft_changes": [
+    "fix_direction.summary: Add that the in-flight promise must be cleared (set to null) once it settles (whether resolved or rejected), so future 401s after the new token eventually expires will correctly issue a new refresh.",
+    "fix_direction.summary: Note that client-side deduplication only covers within-tab concurrency. For cross-tab scenarios (two open tabs with the same rt cookie), the server-side rotate() should ideally be wrapped in a transaction or a SELECT-then-UPDATE with a single atomic statement; however the primary trigger is within-tab and the client fix eliminates it for the common case.",
+    "fix_direction.regression_test_idea: Rewrite to use the existing api vitest+supertest setup: send two simultaneous POST /auth/refresh requests with the same refresh token cookie to the Express app and assert that both return 200 with a valid access token (or that exactly one returns 200 and the other gracefully returns without revoking the family — aligning with the desired fix behavior).",
+    "fix_direction.files: Add demo-app/api/src/services/tokenService.ts as a secondary affected file because the cross-tab scenario still requires a server-side fix."
+  ]
+}

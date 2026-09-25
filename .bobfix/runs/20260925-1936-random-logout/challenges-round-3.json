@@ -1,0 +1,32 @@
+{
+  "round": 3,
+  "verdict": "weakened",
+  "challenges": [
+    {
+      "id": "S8",
+      "axis": "fix-simulation",
+      "claim": "Secondary fix proposes wrapping findByHash + revoke in a SQLite transaction, but rotate() is an async function with await calls at lines 61-62 that happen AFTER the DB write. better-sqlite3 cannot hold open transactions across await boundaries, so the transaction would commit before the async operations complete, leaving the same race window.",
+      "evidence": [
+        {
+          "file": "demo-app/api/src/services/tokenService.ts",
+          "lines": "60-62",
+          "quote": "    repo.revoke(row.id);\n    const user = await users.findById(row.user_id);\n    const access = await signAccessToken(user, row.family_id);"
+        }
+      ],
+      "severity": "blocking"
+    },
+    {
+      "id": "S9",
+      "axis": "regression-test",
+      "claim": "Client-side test scenario (b) proposes importing apiClient.ts in Node with a mocked fetch, but session.logout() calls window.location.href which is undefined in Node.js, causing a ReferenceError that would make the test crash rather than pass or fail meaningfully.",
+      "evidence": [
+        {
+          "file": "demo-app/web/src/lib/session.ts",
+          "lines": "11-15",
+          "quote": "export function logout(): void {\n  _accessToken = null;\n  fetch(\"/auth/logout\", { method: \"POST\", credentials: \"include\" }).catch(() => {});\n  window.location.href = \"/login\";\n}"
+        }
+      ],
+      "severity": "blocking"
+    }
+  ]
+}

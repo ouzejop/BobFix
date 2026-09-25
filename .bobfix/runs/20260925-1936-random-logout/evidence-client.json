@@ -1,0 +1,113 @@
+{
+  "agent": "client-investigator",
+  "scope": "Client-side authentication flow: session management, API interceptor, login handler, and dashboard initialization",
+  "files_examined": [
+    "demo-app/web/src/lib/session.ts",
+    "demo-app/web/src/lib/apiClient.ts",
+    "demo-app/web/src/pages/Login.tsx",
+    "demo-app/web/src/pages/Dashboard.tsx"
+  ],
+  "evidence": [
+    {
+      "id": "C1",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/session.ts",
+      "lines": "1-5",
+      "quote": "let _accessToken: string | null = null;\n\nexport function getAccessToken(): string | null {\n  return _accessToken;\n}",
+      "observation": "Access token is stored in module-scoped variable that is initialized to null and only in-memory (not persisted to localStorage, sessionStorage, or cookies)"
+    },
+    {
+      "id": "C2",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/session.ts",
+      "lines": "7-9",
+      "quote": "export function setAccessToken(token: string): void {\n  _accessToken = token;\n}",
+      "observation": "Access token is set only in memory; no persistence mechanism"
+    },
+    {
+      "id": "C3",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/session.ts",
+      "lines": "11-15",
+      "quote": "export function logout(): void {\n  _accessToken = null;\n  fetch(\"/auth/logout\", { method: \"POST\", credentials: \"include\" }).catch(() => {});\n  window.location.href = \"/login\";\n}",
+      "observation": "Logout clears token and redirects to /login; fetch error is silently caught"
+    },
+    {
+      "id": "C4",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/apiClient.ts",
+      "lines": "3-12",
+      "quote": "async function refreshSession(): Promise<boolean> {\n  const res = await fetch(\"/auth/refresh\", {\n    method: \"POST\",\n    credentials: \"include\",\n  });\n  if (!res.ok) return false;\n  const data = (await res.json()) as { accessToken: string };\n  setAccessToken(data.accessToken);\n  return true;\n}",
+      "observation": "Refresh token endpoint uses credentials: include (sends refresh token via cookie), returns false on any non-ok status without error visibility"
+    },
+    {
+      "id": "C5",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/apiClient.ts",
+      "lines": "14-46",
+      "quote": "export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {\n  const token = getAccessToken();\n  const res = await fetch(path, {\n    ...options,\n    credentials: \"include\",\n    headers: {\n      ...options.headers,\n      ...(token ? { Authorization: `Bearer ${token}` } : {}),\n    },\n  });\n\n  if (res.status === 401) {\n    const refreshed = await refreshSession();\n    if (!refreshed) {\n      logout();\n      throw new Error(\"Session expired\");\n    }\n    const newToken = getAccessToken();\n    const retry = await fetch(path, {\n      ...options,\n      credentials: \"include\",\n      headers: {\n        ...options.headers,\n        ...(newToken ? { Authorization: `Bearer ${newToken}` } : {}),\n      },\n    });\n    if (!retry.ok) throw new Error(`Request failed: ${retry.status}`);\n    return retry.json() as Promise<T>;\n  }\n\n  if (!res.ok) throw new Error(`Request failed: ${res.status}`);\n  return res.json() as Promise<T>;\n}",
+      "observation": "API interceptor handles 401 by attempting refresh; throws error on failed refresh but no catch handler in dashboard useEffect"
+    },
+    {
+      "id": "C6",
+      "kind": "code",
+      "file": "demo-app/web/src/pages/Dashboard.tsx",
+      "lines": "29-39",
+      "quote": "useEffect(() => {\n    Promise.all([\n      api<Me>(\"/me\"),\n      api<Order[]>(\"/orders\"),\n      api<CartItem[]>(\"/cart\"),\n    ]).then(([meData, ordersData, cartData]) => {\n      setMe(meData);\n      setOrders(ordersData);\n      setCart(cartData);\n    });\n  }, []);",
+      "observation": "Dashboard useEffect calls 3 parallel API requests with Promise.all but has no .catch() handler for errors"
+    },
+    {
+      "id": "C7",
+      "kind": "code",
+      "file": "demo-app/web/src/pages/Login.tsx",
+      "lines": "9-25",
+      "quote": "const handleSubmit = async (e: FormEvent) => {\n    e.preventDefault();\n    setError(null);\n    const res = await fetch(\"/auth/login\", {\n      method: \"POST\",\n      headers: { \"Content-Type\": \"application/json\" },\n      credentials: \"include\",\n      body: JSON.stringify({ email, password }),\n    });\n    if (!res.ok) {\n      setError(\"Invalid email or password\");\n      return;\n    }\n    const data = (await res.json()) as { accessToken: string };\n    setAccessToken(data.accessToken);\n    window.location.href = \"/\";\n  };",
+      "observation": "Login sets token in memory then navigates to /; token is lost on page refresh before reaching Dashboard"
+    },
+    {
+      "id": "C8",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/apiClient.ts",
+      "lines": "15",
+      "quote": "const token = getAccessToken();",
+      "observation": "API client checks memory-only token at function call time; if page was refreshed and app re-initialized, token is null"
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "HC1",
+      "statement": "User lands on Dashboard after login, then refreshes the page. On refresh, the module-scoped _accessToken variable is reset to null (C1), so subsequent API calls in Dashboard useEffect are made without Authorization header (C8), causing 401 responses that trigger the refresh flow.",
+      "supporting_evidence": ["C1", "C2", "C8", "C5", "C7"],
+      "contradicting_evidence": [],
+      "confidence": 0.95
+    },
+    {
+      "id": "HC2",
+      "statement": "Dashboard useEffect has no .catch() handler (C6), so when api() calls throw 'Session expired' after failed refresh, the error is an unhandled rejection and the user just sees the login redirect (from logout()) with no UI error.",
+      "supporting_evidence": ["C5", "C6"],
+      "contradicting_evidence": [],
+      "confidence": 0.85
+    },
+    {
+      "id": "HC3",
+      "statement": "The 3 concurrent api() calls in Promise.all each independently call refreshSession() on 401, resulting in 3 simultaneous POST /auth/refresh requests with the same refresh token cookie.",
+      "supporting_evidence": ["C4", "C5", "C6"],
+      "contradicting_evidence": [],
+      "confidence": 0.92
+    },
+    {
+      "id": "HC4",
+      "statement": "The silent redirect to login is caused by logout() being invoked inside api() when refreshSession() returns false — no error UI is ever shown to the user.",
+      "supporting_evidence": ["C3", "C4", "C5"],
+      "contradicting_evidence": [],
+      "confidence": 0.90
+    },
+    {
+      "id": "HC5",
+      "statement": "refreshSession() is not deduplicated or guarded; it is a raw function invoked independently by each concurrent api() call, so all three fire POST /auth/refresh in parallel.",
+      "supporting_evidence": ["C4", "C5", "C6"],
+      "contradicting_evidence": [],
+      "confidence": 0.92
+    }
+  ]
+}

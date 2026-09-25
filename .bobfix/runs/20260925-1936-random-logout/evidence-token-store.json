@@ -1,0 +1,135 @@
+{
+  "agent": "token-store-investigator",
+  "scope": "token-store only — demo-app/api/src/db/refreshTokenRepo.ts, demo-app/api/src/db/connection.ts, demo-app/api/src/db/migrations/001_init.sql, demo-app/api/tests/auth.test.ts, demo-app/api/tests/token-expiry.test.ts",
+  "files_examined": [
+    "demo-app/api/src/db/refreshTokenRepo.ts",
+    "demo-app/api/src/db/connection.ts",
+    "demo-app/api/src/db/migrations/001_init.sql",
+    "demo-app/api/tests/auth.test.ts",
+    "demo-app/api/tests/token-expiry.test.ts",
+    "demo-app/api/src/services/tokenService.ts",
+    "demo-app/api/src/controllers/refreshController.ts",
+    "demo-app/api/src/middleware/authMiddleware.ts",
+    "demo-app/api/src/db/userRepo.ts"
+  ],
+  "evidence": [
+    {
+      "id": "T1",
+      "kind": "code",
+      "file": "demo-app/api/src/db/connection.ts",
+      "lines": "8-10",
+      "quote": "export function openDb(path: string): Database.Database {\n  const db = new Database(path);\n  db.pragma(\"journal_mode = WAL\");",
+      "observation": "Database is configured with WAL mode, allowing concurrent reads and writes with writes serialized."
+    },
+    {
+      "id": "T2",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "51-71",
+      "quote": "const rotate = async (oldToken: string) => {\n    const row = repo.findByHash(sha256(oldToken));\n    if (!row || row.expires_at < Date.now() || repo.isFamilyRevoked(row.family_id)) {\n      throw new InvalidToken();\n    }\n    if (row.revoked_at) {\n      repo.revokeFamily(row.family_id);\n      throw new TokenReuseDetected();\n    }\n    repo.revoke(row.id);\n    const user = await users.findById(row.user_id);\n    const access = await signAccessToken(user, row.family_id);\n    const refresh = newRefreshToken();\n    repo.insert({\n      familyId: row.family_id,\n      userId: user.id,\n      hash: sha256(refresh),\n      expiresAt: Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,\n    });\n    return { access, refresh };\n  };",
+      "observation": "The rotate function retrieves a row at line 52, revokes it at line 60, then yields via two awaits at lines 61-62. During this yield window, a concurrent request can query the same token (now revoked) and trigger family revocation."
+    },
+    {
+      "id": "T3",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "14-20",
+      "quote": "const findByHash = (hash: string): RefreshTokenRow | undefined => {\n    return db\n      .prepare<[string], RefreshTokenRow>(\n        \"SELECT * FROM refresh_tokens WHERE token_hash = ?\"\n      )\n      .get(hash);\n  };",
+      "observation": "findByHash returns a plain JavaScript object (snapshot of row at query time). This object is NOT updated when the database changes — but a second call to findByHash by a concurrent request WILL see the updated revoked_at."
+    },
+    {
+      "id": "T4",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "33-37",
+      "quote": "const revoke = (id: number): void => {\n    db.prepare(\n      \"UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?\"\n    ).run(Date.now(), id);\n  };",
+      "observation": "revoke writes revoked_at to the database. Called at line 60 of tokenService.ts before async yield. A concurrent findByHash after this point will see revoked_at as set."
+    },
+    {
+      "id": "T5",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "39-46",
+      "quote": "const revokeFamily = (familyId: string): void => {\n    db.prepare(\n      \"UPDATE token_families SET revoked_at = ? WHERE id = ?\"\n    ).run(Date.now(), familyId);\n    db.prepare(\n      \"UPDATE refresh_tokens SET revoked_at = ? WHERE family_id = ? AND revoked_at IS NULL\"\n    ).run(Date.now(), familyId);\n  };",
+      "observation": "revokeFamily marks all tokens in the family as revoked. If called by a concurrent request during another request's token rotation, it invalidates the family used by the original request, making newly-issued tokens from that rotation immediately invalid."
+    },
+    {
+      "id": "T6",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "60-62",
+      "quote": "    repo.revoke(row.id);\n    const user = await users.findById(row.user_id);\n    const access = await signAccessToken(user, row.family_id);",
+      "observation": "After revoking the individual token (line 60, synchronous), two async calls yield control to the event loop. During this window, another concurrent request can acquire the Node.js event loop, execute findByHash (seeing revoked_at set), and call revokeFamily."
+    },
+    {
+      "id": "T7",
+      "kind": "code",
+      "file": "demo-app/api/src/controllers/refreshController.ts",
+      "lines": "9-31",
+      "quote": "const refresh = async (req: Request, res: Response): Promise<void> => {\n    const oldToken = (req.cookies as Record<string, string>)[\"rt\"];\n    if (!oldToken) {\n      res.status(401).json({ error: \"No refresh token\" });\n      return;\n    }\n    try {\n      const { access, refresh: newRefresh } = await tokenService.rotate(oldToken);\n      res.cookie(\"rt\", newRefresh, {\n        httpOnly: true,\n        sameSite: \"strict\",\n        maxAge: REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,\n      });\n      res.json({ accessToken: access });\n    } catch (err) {\n      if (err instanceof InvalidToken || err instanceof TokenReuseDetected) {\n        res.clearCookie(\"rt\");\n        res.status(401).json({ error: \"Unauthorized\" });\n        return;\n      }\n      throw err;\n    }\n  };",
+      "observation": "When TokenReuseDetected is thrown by a concurrent request, it returns 401 and clears the rt cookie. A concurrent refresh that triggered revokeFamily also invalidates the family for the request that already issued new tokens."
+    },
+    {
+      "id": "T8",
+      "kind": "code",
+      "file": "demo-app/api/src/middleware/authMiddleware.ts",
+      "lines": "16-22",
+      "quote": "    try {\n      const payload = await verifyAccessToken(token);\n      const fid = payload[\"fid\"] as string | undefined;\n      if (!fid || repo.isFamilyRevoked(fid)) {\n        res.status(401).json({ error: \"Unauthorized\" });\n        return;\n      }\n      (req as Request & { userId: number }).userId = Number(payload.sub);\n      next();",
+      "observation": "Every protected request checks if the token's family is revoked. If a concurrent request revoked the family during token rotation, newly-issued tokens from that rotation will be rejected with 401."
+    },
+    {
+      "id": "T9",
+      "kind": "test",
+      "file": "demo-app/api/tests/auth.test.ts",
+      "lines": "138-163",
+      "quote": "it(\"reusing old token after rotation revokes the family\", async () => {\n    const { app } = setup();\n    const loginRes = await request(app)\n      .post(\"/auth/login\")\n      .send({ email: \"alice@shoply.test\", password: \"demo1234\" });\n    const cookies = loginRes.headers[\"set-cookie\"] as string[];\n    const originalRtCookie = cookies.find((c: string) => c.startsWith(\"rt=\"))!;\n\n    const firstRefreshRes = await request(app)\n      .post(\"/auth/refresh\")\n      .set(\"Cookie\", originalRtCookie);\n    expect(firstRefreshRes.status).toBe(200);\n\n    const newCookies = firstRefreshRes.headers[\"set-cookie\"] as string[];\n    const newRtCookie = newCookies.find((c: string) => c.startsWith(\"rt=\"))!;\n\n    const reuseOldRes = await request(app)\n      .post(\"/auth/refresh\")\n      .set(\"Cookie\", originalRtCookie);\n    expect(reuseOldRes.status).toBe(401);\n\n    const newTokenNowRevokedRes = await request(app)\n      .post(\"/auth/refresh\")\n      .set(\"Cookie\", newRtCookie);\n    expect(newTokenNowRevokedRes.status).toBe(401);\n  });",
+      "observation": "Existing test covers sequential reuse detection correctly but does not test concurrent refresh requests — the race condition described by this bug is not covered."
+    },
+    {
+      "id": "T10",
+      "kind": "schema",
+      "file": "demo-app/api/src/db/migrations/001_init.sql",
+      "lines": "8-13",
+      "quote": "CREATE TABLE IF NOT EXISTS token_families (\n  id TEXT PRIMARY KEY,\n  user_id INTEGER NOT NULL REFERENCES users(id),\n  created_at INTEGER NOT NULL,\n  revoked_at INTEGER NULL\n);",
+      "observation": "token_families table has revoked_at as nullable. When revoked, the value is set, making all tokens in that family invalid via isFamilyRevoked check."
+    },
+    {
+      "id": "T11",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "48-55",
+      "quote": "const isFamilyRevoked = (familyId: string): boolean => {\n    const row = db\n      .prepare<[string], { revoked_at: number | null }>(\"SELECT revoked_at FROM token_families WHERE id = ?\"\n      )\n      .get(familyId);\n    return row == null || row.revoked_at != null;\n  };",
+      "observation": "isFamilyRevoked returns true if the family row doesn't exist OR revoked_at is set. This check is called in authMiddleware for every protected request, so a revoked family immediately blocks all requests."
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "HT1",
+      "statement": "A race condition in concurrent token refresh requests causes silent logout: three simultaneous refresh requests (from Dashboard's parallel API calls) allow a second or third request to detect 'token reuse' and revoke the entire token family, even though the first request legitimately succeeded.",
+      "supporting_evidence": ["T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"],
+      "contradicting_evidence": [],
+      "confidence": 0.85
+    },
+    {
+      "id": "HT2",
+      "statement": "The async yield in tokenService.rotate() after revoke() but before insert() creates a window where a concurrent request sees the same token as revoked and triggers revokeFamily, invalidating the family being used by the first request.",
+      "supporting_evidence": ["T2", "T3", "T4", "T6"],
+      "contradicting_evidence": [],
+      "confidence": 0.9
+    },
+    {
+      "id": "HT3",
+      "statement": "The existing test suite covers sequential token reuse but not concurrent refresh calls — no test guards against this race condition.",
+      "supporting_evidence": ["T9"],
+      "contradicting_evidence": [],
+      "confidence": 0.95
+    },
+    {
+      "id": "HT4",
+      "statement": "Newly-issued tokens from the first (legitimate) refresh call are immediately rejected by authMiddleware because the family was revoked by the concurrent second request, causing 401 on every subsequent API call after the refresh.",
+      "supporting_evidence": ["T5", "T7", "T8", "T11"],
+      "contradicting_evidence": [],
+      "confidence": 0.85
+    }
+  ]
+}

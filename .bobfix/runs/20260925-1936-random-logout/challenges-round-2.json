@@ -1,0 +1,60 @@
+{
+  "round": 2,
+  "verdict": "weakened",
+  "challenges": [
+    {
+      "id": "S5",
+      "axis": "regression-test",
+      "claim": "The proposed server-side regression test (two direct POST /auth/refresh requests) does not verify the primary client-side fix. It tests server behavior but not whether the deduplication in apiClient.ts actually prevents multiple POST requests from three concurrent api() calls.",
+      "evidence": [
+        {
+          "file": "demo-app/web/src/lib/apiClient.ts",
+          "lines": "14-46",
+          "quote": "export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {\n  const token = getAccessToken();\n  const res = await fetch(path, { ... });\n\n  if (res.status === 401) {\n    const refreshed = await refreshSession();\n    if (!refreshed) {\n      logout();\n      throw new Error(\"Session expired\");\n    }\n    ...\n  }\n  ...\n}"
+        },
+        {
+          "file": "demo-app/web/src/pages/Dashboard.tsx",
+          "lines": "30-38",
+          "quote": "Promise.all([\n      api<Me>(\"/me\"),\n      api<Order[]>(\"/orders\"),\n      api<CartItem[]>(\"/cart\"),\n    ])"
+        }
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "S6",
+      "axis": "fix-simulation",
+      "claim": "The fix direction does not specify error handling for the in-flight promise. If the fetch() network call throws (e.g., network failure), the shared in-flight promise rejects. Concurrent callers awaiting the same rejected promise receive a thrown exception, not a boolean false, so the `if (!refreshed)` check in api() would not be reached.",
+      "evidence": [
+        {
+          "file": "demo-app/web/src/lib/apiClient.ts",
+          "lines": "3-12",
+          "quote": "async function refreshSession(): Promise<boolean> {\n  const res = await fetch(\"/auth/refresh\", {\n    method: \"POST\",\n    credentials: \"include\",\n  });\n  if (!res.ok) return false;\n  const data = (await res.json()) as { accessToken: string };\n  setAccessToken(data.accessToken);\n  return true;\n}"
+        },
+        {
+          "file": "demo-app/web/src/lib/apiClient.ts",
+          "lines": "25-30",
+          "quote": "if (res.status === 401) {\n    const refreshed = await refreshSession();\n    if (!refreshed) {\n      logout();\n      throw new Error(\"Session expired\");\n    }"
+        }
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "S7",
+      "axis": "regression-test",
+      "claim": "The test sending two concurrent POST /auth/refresh to Express does not guarantee the DB race manifests: SQLite processes statements serially, and the race depends on Node.js yielding between revoke() and findByHash() across concurrent requests. If Request B's findByHash runs after Request A's revoke, the test behaves as desired; but there is no guarantee of interleaving order without instrumentation.",
+      "evidence": [
+        {
+          "file": "demo-app/api/src/services/tokenService.ts",
+          "lines": "60-61",
+          "quote": "    repo.revoke(row.id);\n    const user = await users.findById(row.user_id);"
+        },
+        {
+          "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+          "lines": "33-37",
+          "quote": "const revoke = (id: number): void => {\n    db.prepare(\n      \"UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?\"\n    ).run(Date.now(), id);\n  };"
+        }
+      ],
+      "severity": "minor"
+    }
+  ]
+}

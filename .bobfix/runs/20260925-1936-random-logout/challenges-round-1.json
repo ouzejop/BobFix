@@ -1,0 +1,68 @@
+{
+  "round": 1,
+  "verdict": "weakened",
+  "challenges": [
+    {
+      "id": "S1",
+      "axis": "coverage",
+      "claim": "The fix only prevents concurrency within a single browser tab. Multiple concurrent tabs share the same httpOnly refresh-token cookie but have independent JS contexts and separate in-flight promise variables, so the race can still happen across tabs.",
+      "evidence": [
+        {
+          "file": "demo-app/web/src/lib/session.ts",
+          "lines": "1",
+          "quote": "let _accessToken: string | null = null;"
+        },
+        {
+          "file": "demo-app/web/src/lib/apiClient.ts",
+          "lines": "3-12",
+          "quote": "async function refreshSession(): Promise<boolean> {\n  const res = await fetch(\"/auth/refresh\", {\n    method: \"POST\",\n    credentials: \"include\",\n  });\n  if (!res.ok) return false;\n  const data = (await res.json()) as { accessToken: string };\n  setAccessToken(data.accessToken);\n  return true;\n}"
+        }
+      ],
+      "severity": "blocking"
+    },
+    {
+      "id": "S2",
+      "axis": "fix-simulation",
+      "claim": "The fix description does not specify when the in-flight promise must be cleared after resolution. If it is never cleared, a future 401 after the new token expires would reuse the stale resolved promise and never issue another refresh.",
+      "evidence": [
+        {
+          "file": "demo-app/web/src/lib/apiClient.ts",
+          "lines": "25-26",
+          "quote": "if (res.status === 401) {\n    const refreshed = await refreshSession();"
+        }
+      ],
+      "severity": "blocking"
+    },
+    {
+      "id": "S3",
+      "axis": "regression-test",
+      "claim": "The proposed regression test cannot be run with the existing tooling. The web package has no test runner and the api tests use vitest+supertest (server-side only). Testing concurrent api() calls from the client layer requires either a client-side test framework (e.g. vitest with jsdom) or browser automation, neither of which is present.",
+      "evidence": [
+        {
+          "file": "demo-app/web/package.json",
+          "lines": "1-20",
+          "quote": "{\n  \"name\": \"@shoply/web\",\n  \"version\": \"1.0.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {\n    \"dev\": \"vite\",\n    \"build\": \"tsc && vite build\"\n  },\n  \"dependencies\": {\n    \"react\": \"^18.2.0\",\n    \"react-dom\": \"^18.2.0\"\n  },\n  \"devDependencies\": {\n    \"@types/react\": \"^18.2.52\",\n    \"@types/react-dom\": \"^18.2.18\",\n    \"@vitejs/plugin-react\": \"^4.2.1\",\n    \"typescript\": \"^5.3.3\",\n    \"vite\": \"^5.0.12\"\n  }\n}"
+        },
+        {
+          "file": "demo-app/api/package.json",
+          "lines": "6-8",
+          "quote": "\"scripts\": {\n    \"start\": \"tsx src/server.ts\",\n    \"test\": \"vitest run\"\n  }"
+        }
+      ],
+      "severity": "blocking"
+    },
+    {
+      "id": "S4",
+      "axis": "fix-simulation",
+      "claim": "The fix description is ambiguous about the promise lifecycle: it says 'per page load' but does not state that the promise must be cleared (set back to null) once it resolves so that the next 401 (access token expires again mid-session) correctly fires a new refresh.",
+      "evidence": [
+        {
+          "file": "demo-app/web/src/lib/apiClient.ts",
+          "lines": "14-46",
+          "quote": "export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {\n  const token = getAccessToken();\n  const res = await fetch(path, {\n    ...\n  });\n\n  if (res.status === 401) {\n    const refreshed = await refreshSession();\n    if (!refreshed) {\n      logout();\n      throw new Error(\"Session expired\");\n    }\n    ..."
+        }
+      ],
+      "severity": "major"
+    }
+  ]
+}

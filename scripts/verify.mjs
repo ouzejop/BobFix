@@ -38,6 +38,7 @@ mkdirSync(runDir, { recursive: true });
 const scratch = mkdtempSync(join(tmpdir(), "bobfix-"));
 
 function vitest(cwd, testFile, label) {
+  if (args.cmd) return generic(cwd, testFile, label);
   const report = join(scratch, `${label}.json`);
   const cliArgs = ["vitest", "run", "--reporter=json", `--outputFile=${report}`];
   if (testFile) cliArgs.push(testFile);
@@ -57,6 +58,25 @@ function vitest(cwd, testFile, label) {
     failed: r?.numFailedTests ?? null,
     // true only when tests actually ran; a crash or missing file is not a "failure" of the test
     ran: r !== null && (r.numTotalTests ?? 0) > 0,
+    log: `${label}.txt`,
+  };
+}
+
+// Runner-agnostic mode: exit code only; crash-like logs are not counted as a test failure.
+const CRASH = /(cannot find module|modulenotfounderror|no module named|syntaxerror|command not found|no tests? (found|ran|collected)|error: collection|failed to compile|cannot find package)/i;
+function generic(cwd, testFile, label) {
+  const started = Date.now();
+  const p = spawnSync(`${args.cmd} ${testFile ?? ""}`, { cwd, shell: true, encoding: "utf8", env: { ...process.env, CI: "1" } });
+  const output = `${p.stdout ?? ""}${p.stderr ?? ""}`;
+  writeFileSync(join(runDir, `${label}.txt`), output);
+  const crashed = CRASH.test(output);
+  return {
+    exit_code: p.status,
+    duration_ms: Date.now() - started,
+    total: null,
+    passed: p.status === 0 ? "all" : null,
+    failed: p.status === 0 ? 0 : crashed ? null : "some",
+    ran: !crashed,
     log: `${label}.txt`,
   };
 }
@@ -95,13 +115,14 @@ if (args.build) {
 }
 
 const checks = {
-  bug_reproduced_before_fix: before.ran && before.failed > 0,
+  bug_reproduced_before_fix: before.ran && before.exit_code !== 0 && before.failed !== 0,
   regression_test_passes_after_fix: after.ran && after.exit_code === 0 && after.failed === 0,
   full_suite_passes: suite.ran && suite.exit_code === 0 && suite.failed === 0,
   build_ok: build.skipped || build.ok,
 };
 const result = {
   run_id: args.run,
+  runner: args.cmd ?? "vitest (json reporter)",
   base_ref: baseSha,
   fixed_ref: headSha,
   regression_test: args.test,

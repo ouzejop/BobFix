@@ -1,0 +1,121 @@
+{
+  "run_id": "20260925-1936-random-logout",
+  "root_cause": {
+    "title": "Three concurrent refreshSession() calls triggered by Dashboard's parallel API requests cause token-reuse detection, revoking the user's entire token family",
+    "explanation": "When a user returns to the app after the 15-minute access token TTL, the page reload clears the in-memory access token (_accessToken = null). Dashboard's useEffect fires three parallel api() calls (/me, /orders, /cart), all of which receive 401 immediately because no Authorization header is sent. Each api() call independently invokes refreshSession(), producing three simultaneous POST /auth/refresh requests with the same rt cookie. Inside tokenService.rotate(), the first request revokes the old refresh token (a synchronous SQLite write at line 60), then yields the event loop at two async calls (users.findById and signAccessToken at lines 61-62). During that yield, the second concurrent request's findByHash() reads the same row — now with revoked_at set — treats it as a theft/reuse attack, and calls revokeFamily(). The first request then completes and issues a new access token, but because the family is now revoked, authMiddleware's isFamilyRevoked() check rejects it with 401. The second and third refresh calls also return 401 (TokenReuseDetected), causing refreshSession() to return false, triggering logout() which silently navigates to /login with no error shown to the user.",
+    "confidence": 0.95,
+    "causal_chain": [
+      {
+        "step": 1,
+        "scope": "client",
+        "evidence": ["C1", "C8"],
+        "what": "Page reload resets _accessToken to null (session.ts:1); Dashboard's useEffect fires three parallel api() calls without Authorization header (Dashboard.tsx:30-38)"
+      },
+      {
+        "step": 2,
+        "scope": "client",
+        "evidence": ["C5", "C6"],
+        "what": "All three api() calls receive 401 and each independently calls refreshSession() — refreshSession is a plain async function with no in-flight guard, so three simultaneous POST /auth/refresh requests are sent (apiClient.ts:25-26)"
+      },
+      {
+        "step": 3,
+        "scope": "refresh-api",
+        "evidence": ["R4", "T6"],
+        "what": "tokenService.rotate() revokes the old token synchronously (line 60), then yields at await signAccessToken() (line 62, genuinely async via jose Web Crypto) — the first request to reach this point holds the revoked row state in its local JS variable"
+      },
+      {
+        "step": 4,
+        "scope": "token-store",
+        "evidence": ["T3", "T4", "T2"],
+        "what": "During the async yield, a second concurrent rotate() call executes findByHash() and reads the same row now with revoked_at set; it interprets this as a reuse attack and calls revokeFamily(), wiping the entire token family (tokenService.ts:56-58)"
+      },
+      {
+        "step": 5,
+        "scope": "refresh-api",
+        "evidence": ["R5", "T8", "T11"],
+        "what": "The first rotate() completes and issues a new access+refresh token pair for the now-revoked family. authMiddleware's isFamilyRevoked() check rejects the new access token with 401. The second/third refresh calls return 401 (refreshController.ts:23-26), causing refreshSession() to return false"
+      },
+      {
+        "step": 6,
+        "scope": "client",
+        "evidence": ["C3", "C4"],
+        "what": "When refreshSession() returns false, api() calls logout() (apiClient.ts:27-28), which silently navigates to /login via window.location.href with no error shown (session.ts:14)"
+      }
+    ],
+    "affected_files": [
+      "demo-app/web/src/lib/apiClient.ts",
+      "demo-app/api/src/services/tokenService.ts"
+    ]
+  },
+  "hypotheses": [
+    {
+      "id": "HC5",
+      "statement": "refreshSession() is called independently by each concurrent api() call — it is not deduplicated or guarded by an in-flight promise",
+      "status": "supported",
+      "evidence": ["C4", "C5", "C6"]
+    },
+    {
+      "id": "HT2",
+      "statement": "The async yield inside rotate() after revoke() but before insert() allows a concurrent request to observe the revoked token and call revokeFamily()",
+      "status": "supported",
+      "evidence": ["T2", "T4", "T6"]
+    },
+    {
+      "id": "HC4",
+      "statement": "The redirect to /login is silent — logout() calls window.location.href = '/login' with no error message before navigating",
+      "status": "supported",
+      "evidence": ["C3", "C4"]
+    },
+    {
+      "id": "HT4_newtoken",
+      "statement": "Even when the first refresh completes successfully and issues a new access token, that token is immediately rejected by authMiddleware because revokeFamily() was already called by the concurrent second request",
+      "status": "supported",
+      "evidence": ["T5", "T8", "T11"]
+    },
+    {
+      "id": "HT3",
+      "statement": "No test guards against concurrent refresh calls — the race condition is not in the test suite",
+      "status": "supported",
+      "evidence": ["T9"]
+    },
+    {
+      "id": "HR_expiry",
+      "statement": "Users are logged out because their 30-day refresh token has genuinely expired, not because of a race condition",
+      "status": "rejected",
+      "evidence": ["R10"],
+      "reason": "REFRESH_TOKEN_TTL_DAYS is 30 (config.ts:2). A 30-day expiry does not explain logouts that happen after users are away for 'a while', which matches the 15-minute ACCESS_TOKEN_TTL. The randomness and short window are characteristic of a race condition, not expiry."
+    }
+  ],
+  "fix_direction": {
+    "summary": "Two fixes are needed — a primary client-side fix and a secondary server-side fix. Primary: In apiClient.ts, deduplicate concurrent refreshSession() calls using a module-scope in-flight promise variable. When a refresh is already in-flight, subsequent callers await the same promise instead of issuing a new POST /auth/refresh. The in-flight promise MUST (a) be wrapped with .catch(() => false) so it always resolves to boolean and never rejects, preserving the existing contract; and (b) be cleared (set to null) once it settles — whether resolved or rejected — so that future 401s after the new access token expires create a fresh refresh. Secondary: In tokenService.ts, make the revoke step atomic using a conditional UPDATE (WHERE revoked_at IS NULL) instead of an unconditional one, and check the number of affected rows. If zero rows were updated, the token was already revoked by a concurrent request — treat this as TokenReuseDetected and call revokeFamily(). This avoids the problematic race where the second request sees a legitimately-revoked token and falsely triggers family revocation. Note: a SQLite transaction wrapper does NOT work here because rotate() contains async/await operations that span across the transaction boundary in better-sqlite3.",
+    "files": [
+      "demo-app/web/src/lib/apiClient.ts",
+      "demo-app/api/src/services/tokenService.ts"
+    ],
+    "regression_test_idea": "Use the existing api vitest+supertest setup. (1) Log in to get a refresh token cookie. (2) Send two simultaneous POST /auth/refresh requests with the same rt cookie via Promise.all. (3) On unfixed code this should cause at least one request to trigger TokenReuseDetected and family revocation. (4) After the server fix, assert both requests return 200 with valid access tokens and that a subsequent GET /me using either returned token also returns 200 (not 401). Note: testing the client-side deduplication in isolation requires mocking window (e.g. globalThis.window = { location: {} }) before importing apiClient.ts in a Node.js test."
+  },
+  "skeptic": {
+    "rounds": 3,
+    "challenges": 8,
+    "accepted": 6,
+    "refuted": 1,
+    "changes": [
+      "Round 1, S1: Fix direction updated to note the cross-tab residual risk (same race can occur across browser tabs because each tab has independent JS state)",
+      "Round 1, S2: Fix direction updated to require the in-flight promise be cleared after settlement",
+      "Round 1, S3: Regression test idea rewritten from client-only to use api vitest+supertest",
+      "Round 1, S4 (duplicate of S2): Covered by S2 change",
+      "Round 2, S5: Regression test idea split into server-side and client-side scenarios",
+      "Round 2, S6: Fix direction updated to require .catch(() => false) wrapping of the shared promise",
+      "Round 2, S7: REFUTED — await signAccessToken (jose Web Crypto) is genuinely async; the race is reliably triggerable",
+      "Round 3, S8: Secondary fix direction corrected — replace 'SQLite transaction' with 'conditional UPDATE WHERE revoked_at IS NULL' because better-sqlite3 cannot hold transactions across async/await",
+      "Round 3, S9: Client-side test scenario (b) dropped because window.location.href throws in Node.js; added note about mocking window instead"
+    ]
+  },
+  "stats": {
+    "files_examined": 17,
+    "evidence_count": 30,
+    "subagents": 4,
+    "started_at": "2026-09-25T19:36:20Z",
+    "finished_at": "2026-09-25T20:10:00Z"
+  }
+}

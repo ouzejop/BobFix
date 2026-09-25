@@ -1,0 +1,21 @@
+{
+  "round": 3,
+  "rebuttals": [
+    {
+      "challenge_id": "S8",
+      "verdict": "accepted",
+      "reasoning": "Confirmed by code: rotate() is async with await calls at lines 61-62 after the synchronous revoke() at line 60. better-sqlite3's db.transaction() is a synchronous wrapper — it would commit before the awaits, so wrapping findByHash+revoke in a transaction does NOT close the race window where a concurrent request reads the revoked row between the revoke() write and the end of the async operations. The correct server-side fix is a conditional UPDATE (UPDATE ... WHERE revoked_at IS NULL) that makes the revoke idempotent: if a second concurrent request attempts to revoke the same row that is already revoked, it updates zero rows and can be detected without calling revokeFamily(). Fix direction updated to replace 'wrap in transaction' with 'use conditional atomic UPDATE'.",
+      "code_checked": "demo-app/api/src/services/tokenService.ts:60-62, demo-app/api/src/db/refreshTokenRepo.ts:33-37"
+    },
+    {
+      "challenge_id": "S9",
+      "verdict": "accepted",
+      "reasoning": "Confirmed by code: session.ts:14 calls window.location.href = '/login', which throws ReferenceError in Node.js. The client-side unit test scenario (b) as written would crash immediately when logout() is triggered. Drop scenario (b) from the regression test idea. The primary server-side regression test (a) is sufficient to prove the bug is reproducible and that the server fix works. Optionally note that a client unit test for the deduplication logic would require mocking window (e.g., via globalThis.window = { location: {} }) before importing the module.",
+      "code_checked": "demo-app/web/src/lib/session.ts:11-15"
+    }
+  ],
+  "draft_changes": [
+    "fix_direction secondary: Replace 'wrap findByHash + revoke in a SQLite transaction' with 'change revoke() to a conditional UPDATE (WHERE revoked_at IS NULL) and check the number of affected rows; if zero rows were updated, the token was already revoked by a concurrent request — treat it as TokenReuseDetected and call revokeFamily(). This is atomic in SQLite without requiring a transaction across async boundaries.'",
+    "fix_direction regression_test_idea: Drop scenario (b). The regression test is: use vitest+supertest; send two simultaneous POST /auth/refresh requests with the same rt cookie via Promise.all; assert that after the server fix, both return 200 and neither triggers family revocation; confirm a subsequent GET /me with the returned access token returns 200. Note that testing the client-side deduplication separately requires mocking window before importing apiClient.ts."
+  ]
+}

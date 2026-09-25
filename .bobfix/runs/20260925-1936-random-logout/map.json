@@ -1,0 +1,42 @@
+{
+  "run_id": "20260925-1936-random-logout",
+  "system_parts": {
+    "web-client": {
+      "description": "React frontend (TypeScript). Handles login UI, session state, access token storage and refresh flow on page load.",
+      "paths": ["demo-app/web/src/lib/session.ts", "demo-app/web/src/lib/apiClient.ts", "demo-app/web/src/pages/Login.tsx", "demo-app/web/src/pages/Dashboard.tsx"]
+    },
+    "api-auth": {
+      "description": "Express API auth controllers and token service. Issues JWTs, handles refresh-token grant, validates tokens.",
+      "paths": ["demo-app/api/src/controllers/authController.ts", "demo-app/api/src/controllers/refreshController.ts", "demo-app/api/src/services/tokenService.ts", "demo-app/api/src/middleware/authMiddleware.ts", "demo-app/api/src/config.ts"]
+    },
+    "token-persistence": {
+      "description": "Refresh token repository (DB layer) and DB migrations. Stores, looks up and invalidates refresh tokens.",
+      "paths": ["demo-app/api/src/db/refreshTokenRepo.ts", "demo-app/api/src/db/connection.ts", "demo-app/api/src/db/migrations/001_init.sql", "demo-app/api/tests/auth.test.ts", "demo-app/api/tests/token-expiry.test.ts"]
+    }
+  },
+  "entry_points": [
+    "demo-app/web/src/lib/session.ts — initSession() called on page load, decides whether to redirect to login",
+    "demo-app/api/src/controllers/refreshController.ts — POST /refresh, consumes refresh token and issues new access token"
+  ],
+  "bug_flow": "On page load the client checks if the access token is still valid. If expired, it should silently exchange the refresh token via POST /refresh for a new access token and stay logged in. Instead users end up on the login page with no error, suggesting the refresh either silently fails, is never attempted, or the redirect-to-login decision fires before the refresh completes.",
+  "investigation_scopes": [
+    {
+      "name": "client",
+      "prefix": "C",
+      "paths": ["demo-app/web/src/lib/session.ts", "demo-app/web/src/lib/apiClient.ts", "demo-app/web/src/pages/Login.tsx", "demo-app/web/src/pages/Dashboard.tsx"],
+      "why": "The symptom is a silent redirect to login. The client session-init and token-refresh logic is the first place to look for why the refresh is not attempted or why the redirect fires too early."
+    },
+    {
+      "name": "refresh-api",
+      "prefix": "R",
+      "paths": ["demo-app/api/src/controllers/refreshController.ts", "demo-app/api/src/services/tokenService.ts", "demo-app/api/src/middleware/authMiddleware.ts", "demo-app/api/src/config.ts", "demo-app/api/src/app.ts"],
+      "why": "If the client does call /refresh, the API could be returning an error (silently to the user) due to token validation, expiry logic, or error handling that does not propagate correctly."
+    },
+    {
+      "name": "token-store",
+      "prefix": "T",
+      "paths": ["demo-app/api/src/db/refreshTokenRepo.ts", "demo-app/api/src/db/connection.ts", "demo-app/api/src/db/migrations/001_init.sql", "demo-app/api/tests/auth.test.ts", "demo-app/api/tests/token-expiry.test.ts"],
+      "why": "The refresh token must exist and not be expired in the DB for the exchange to succeed. The DB schema, rotation/deletion logic and expiry values directly affect whether the refresh succeeds or silently fails when users return after a while."
+    }
+  ]
+}

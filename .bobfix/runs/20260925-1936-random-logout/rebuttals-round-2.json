@@ -1,0 +1,27 @@
+{
+  "round": 2,
+  "rebuttals": [
+    {
+      "challenge_id": "S5",
+      "verdict": "accepted",
+      "reasoning": "The skeptic is correct that a server-side supertest test of POST /auth/refresh verifies the server race but not the client-side deduplication logic. The regression test idea needs two distinct scenarios: (1) a server-side test using the existing vitest+supertest setup that sends two simultaneous POST /auth/refresh requests and asserts neither request triggers revokeFamily; (2) an acknowledgement that the client-side deduplication should be tested as a unit test of apiClient.ts with a mocked fetch (which would require adding a test runner to the web package, or refactoring the test into the api package as a pure TS import). The fix direction will be updated to distinguish these two test targets.",
+      "code_checked": "demo-app/web/src/lib/apiClient.ts:3-12, demo-app/web/package.json:6-8"
+    },
+    {
+      "challenge_id": "S6",
+      "verdict": "accepted",
+      "reasoning": "Confirmed by code: refreshSession() is declared async and does not catch fetch network errors (lines 3-12). If fetch() throws, the async function rejects, the in-flight shared promise rejects, and every concurrent awaiter throws instead of receiving a boolean false. The api() caller's `if (!refreshed)` check (line 27) is never reached. The existing code has the same flaw today (network errors are unhandled), but the dedup fix must not make it worse: the in-flight promise must be wrapped so it always resolves to boolean (e.g., .catch(() => false)), preserving the existing contract. Fix direction updated.",
+      "code_checked": "demo-app/web/src/lib/apiClient.ts:3-12, 25-30"
+    },
+    {
+      "challenge_id": "S7",
+      "verdict": "refuted",
+      "reasoning": "The race window is not theoretical: tokenService.rotate() calls `await signAccessToken(user, row.family_id)` at line 62 (tokenService.ts:62). signAccessToken uses jose's SignJWT.sign() (tokenService.ts:30-34), which is genuinely async (it uses the Web Crypto API internally and resolves on the microtask queue). Additionally, `await users.findById()` (line 61) is marked async and yields a Promise even though its body is synchronous (userRepo.ts:17-22), providing a microtask yield. Two concurrent HTTP requests are handled as separate macrotask callbacks in Node.js. When Request A yields at line 62 (await signAccessToken), Request B's macrotask can execute its entire findByHash+revoke sequence before Request A's microtask resumes. The race is reliably triggerable; the test idea is sound.",
+      "code_checked": "demo-app/api/src/services/tokenService.ts:61-62, demo-app/api/src/db/userRepo.ts:17-23, demo-app/api/src/services/tokenService.ts:30-34"
+    }
+  ],
+  "draft_changes": [
+    "fix_direction.summary: Add that the in-flight promise must be .catch(() => false) -wrapped (or equivalent) so it always resolves to boolean and never rejects, preserving the existing contract for all callers.",
+    "fix_direction.regression_test_idea: Split into two scenarios: (a) server-side — use vitest+supertest to send two simultaneous POST /auth/refresh requests with the same rt cookie and assert that after the server fix, both succeed without family revocation; (b) client-side — unit test apiClient.ts by importing it in a Node test with a mocked globalThis.fetch that counts POST /auth/refresh calls, then call api() three times concurrently, and assert exactly one refresh call was made and all three api() calls resolved without calling logout()."
+  ]
+}

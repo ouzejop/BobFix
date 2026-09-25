@@ -1,0 +1,142 @@
+{
+  "agent": "refresh-api-investigator",
+  "scope": "demo-app/api/src/controllers/refreshController.ts, demo-app/api/src/services/tokenService.ts, demo-app/api/src/middleware/authMiddleware.ts, demo-app/api/src/config.ts, demo-app/api/src/app.ts",
+  "files_examined": [
+    "demo-app/api/src/app.ts",
+    "demo-app/api/src/config.ts",
+    "demo-app/api/src/middleware/authMiddleware.ts",
+    "demo-app/api/src/services/tokenService.ts",
+    "demo-app/api/src/controllers/refreshController.ts",
+    "demo-app/api/src/db/refreshTokenRepo.ts",
+    "demo-app/web/src/lib/apiClient.ts",
+    "demo-app/web/src/lib/session.ts",
+    "demo-app/web/src/pages/Dashboard.tsx"
+  ],
+  "evidence": [
+    {
+      "id": "R1",
+      "kind": "code",
+      "file": "demo-app/web/src/pages/Dashboard.tsx",
+      "lines": "29-39",
+      "quote": "useEffect(() => {\n    Promise.all([\n      api<Me>(\"/me\"),\n      api<Order[]>(\"/orders\"),\n      api<CartItem[]>(\"/cart\"),\n    ]).then(([meData, ordersData, cartData]) => {\n      setMe(meData);\n      setOrders(ordersData);\n      setCart(cartData);\n    });\n  }, []);",
+      "observation": "Dashboard component makes 3 concurrent API calls on mount with no error handling. When access token is missing/expired, all 3 requests trigger 401 responses and attempt concurrent refresh."
+    },
+    {
+      "id": "R2",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/apiClient.ts",
+      "lines": "14-42",
+      "quote": "export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {\n  const token = getAccessToken();\n  const res = await fetch(path, {\n    ...options,\n    credentials: \"include\",\n    headers: {\n      ...options.headers,\n      ...(token ? { Authorization: `Bearer ${token}` } : {}),\n    },\n  });\n\n  if (res.status === 401) {\n    const refreshed = await refreshSession();\n    if (!refreshed) {\n      logout();\n      throw new Error(\"Session expired\");\n    }\n    const newToken = getAccessToken();\n    const retry = await fetch(path, {\n      ...options,\n      credentials: \"include\",\n      headers: {\n        ...options.headers,\n        ...(newToken ? { Authorization: `Bearer ${newToken}` } : {}),\n      },\n    });\n    if (!retry.ok) throw new Error(`Request failed: ${retry.status}`);\n    return retry.json() as Promise<T>;\n  }\n\n  if (!res.ok) throw new Error(`Request failed: ${res.status}`);\n  return res.json() as Promise<T>;\n}",
+      "observation": "api() calls refreshSession() when receiving 401. If refreshSession() returns false, logout() is called, redirecting to login page without error message to user."
+    },
+    {
+      "id": "R3",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/apiClient.ts",
+      "lines": "3-12",
+      "quote": "async function refreshSession(): Promise<boolean> {\n  const res = await fetch(\"/auth/refresh\", {\n    method: \"POST\",\n    credentials: \"include\",\n  });\n  if (!res.ok) return false;\n  const data = (await res.json()) as { accessToken: string };\n  setAccessToken(data.accessToken);\n  return true;\n}",
+      "observation": "refreshSession() returns false if POST /auth/refresh does not return ok status. Multiple concurrent calls to this function will all attempt to use the same refresh token."
+    },
+    {
+      "id": "R4",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "51-71",
+      "quote": "const rotate = async (oldToken: string) => {\n  const row = repo.findByHash(sha256(oldToken));\n  if (!row || row.expires_at < Date.now() || repo.isFamilyRevoked(row.family_id)) {\n    throw new InvalidToken();\n  }\n  if (row.revoked_at) {\n    repo.revokeFamily(row.family_id);\n    throw new TokenReuseDetected();\n  }\n  repo.revoke(row.id);\n  const user = await users.findById(row.user_id);\n  const access = await signAccessToken(user, row.family_id);\n  const refresh = newRefreshToken();\n  repo.insert({\n    familyId: row.family_id,\n    userId: user.id,\n    hash: sha256(refresh),\n    expiresAt: Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,\n  });\n  return { access, refresh };\n};",
+      "observation": "Token rotation revokes the old token (line 60) and then awaits async calls (lines 61-62). The await yields the event loop, creating a window where a concurrent request can find the same token marked revoked and call revokeFamily()."
+    },
+    {
+      "id": "R5",
+      "kind": "code",
+      "file": "demo-app/api/src/controllers/refreshController.ts",
+      "lines": "9-31",
+      "quote": "const refresh = async (req: Request, res: Response): Promise<void> => {\n  const oldToken = (req.cookies as Record<string, string>)[\"rt\"];\n  if (!oldToken) {\n    res.status(401).json({ error: \"No refresh token\" });\n    return;\n  }\n  try {\n    const { access, refresh: newRefresh } = await tokenService.rotate(oldToken);\n    res.cookie(\"rt\", newRefresh, {\n      httpOnly: true,\n      sameSite: \"strict\",\n      maxAge: REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,\n    });\n    res.json({ accessToken: access });\n  } catch (err) {\n    if (err instanceof InvalidToken || err instanceof TokenReuseDetected) {\n      res.clearCookie(\"rt\");\n      res.status(401).json({ error: \"Unauthorized\" });\n      return;\n    }\n    throw err;\n  }\n};",
+      "observation": "refreshController catches TokenReuseDetected and returns 401 with cleared cookie. A concurrent refresh that triggers this loses its cookie and the user is immediately logged out."
+    },
+    {
+      "id": "R6",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "33-37",
+      "quote": "const revoke = (id: number): void => {\n  db.prepare(\n    \"UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?\"\n  ).run(Date.now(), id);\n};",
+      "observation": "Token revocation sets revoked_at timestamp in database. Called at line 60 of tokenService.ts before the async yield."
+    },
+    {
+      "id": "R7",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/session.ts",
+      "lines": "11-15",
+      "quote": "export function logout(): void {\n  _accessToken = null;\n  fetch(\"/auth/logout\", { method: \"POST\", credentials: \"include\" }).catch(() => {});\n  window.location.href = \"/login\";\n}",
+      "observation": "logout() performs synchronous navigation to /login. No error message is shown to user before navigation — this explains the 'silent' logout."
+    },
+    {
+      "id": "R8",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/session.ts",
+      "lines": "1-9",
+      "quote": "let _accessToken: string | null = null;\n\nexport function getAccessToken(): string | null {\n  return _accessToken;\n}\n\nexport function setAccessToken(token: string): void {\n  _accessToken = token;\n}",
+      "observation": "Access token is stored in module-level variable. Cleared on page reload, causing api() calls to omit Authorization header."
+    },
+    {
+      "id": "R9",
+      "kind": "code",
+      "file": "demo-app/api/src/middleware/authMiddleware.ts",
+      "lines": "9-28",
+      "quote": "return async (req: Request, res: Response, next: NextFunction): Promise<void> => {\n  const auth = req.headers.authorization;\n  if (!auth || !auth.startsWith(\"Bearer \")) {\n    res.status(401).json({ error: \"Unauthorized\" });\n    return;\n  }\n  const token = auth.slice(7);\n  try {\n    const payload = await verifyAccessToken(token);\n    const fid = payload[\"fid\"] as string | undefined;\n    if (!fid || repo.isFamilyRevoked(fid)) {\n      res.status(401).json({ error: \"Unauthorized\" });\n      return;\n    }\n    (req as Request & { userId: number }).userId = Number(payload.sub);\n    next();\n  } catch {\n    res.status(401).json({ error: \"Unauthorized\" });\n  }\n};",
+      "observation": "authMiddleware returns 401 if Authorization header is missing or if the token's family is revoked. If a family was revoked during concurrent refresh, even newly-issued tokens with that family ID will be rejected."
+    },
+    {
+      "id": "R10",
+      "kind": "code",
+      "file": "demo-app/api/src/config.ts",
+      "lines": "1-3",
+      "quote": "export const ACCESS_TOKEN_TTL = 15 * 60; // seconds\nexport const REFRESH_TOKEN_TTL_DAYS = 30;\nexport const JWT_SECRET = process.env.JWT_SECRET ?? \"dev-only-secret\";",
+      "observation": "Access token TTL is 900 seconds (15 minutes). Users away longer than this will have expired tokens and trigger a 401 + refresh flow on next request."
+    },
+    {
+      "id": "R11",
+      "kind": "code",
+      "file": "demo-app/api/src/app.ts",
+      "lines": "19-25",
+      "quote": "app.post(\"/auth/login\", auth.login);\napp.post(\"/auth/logout\", auth.logout);\napp.post(\"/auth/refresh\", refresh.refresh);\n\napp.get(\"/me\", authMiddleware, shop.me);\napp.get(\"/orders\", authMiddleware, shop.orders);\napp.get(\"/cart\", authMiddleware, shop.cart);",
+      "observation": "/auth/refresh endpoint is unprotected. Protected routes require Authorization header. On page reload with no in-memory token, all protected route requests fail with 401 simultaneously."
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "HR1",
+      "statement": "Users experience silent logout due to concurrent token refresh calls triggered by the 3 parallel API requests in Dashboard.useEffect — the second and third refresh requests detect 'token reuse' and revoke the family.",
+      "supporting_evidence": ["R1", "R2", "R3", "R4", "R5", "R7"],
+      "contradicting_evidence": [],
+      "confidence": 0.95
+    },
+    {
+      "id": "HR2",
+      "statement": "On page reload, _accessToken is cleared, causing all initial API requests to omit Authorization header and receive 401.",
+      "supporting_evidence": ["R8", "R9", "R1"],
+      "contradicting_evidence": [],
+      "confidence": 1.0
+    },
+    {
+      "id": "HR3",
+      "statement": "When the first concurrent refresh attempt succeeds, it marks the refresh token as revoked. Concurrent refresh attempts with the same token detect revocation and throw TokenReuseDetected, revoking the entire family.",
+      "supporting_evidence": ["R4", "R6"],
+      "contradicting_evidence": [],
+      "confidence": 1.0
+    },
+    {
+      "id": "HR4",
+      "statement": "Even if the first refresh succeeds and returns new tokens, the family may already be revoked by a concurrent request, causing authMiddleware to reject the new access token with 401.",
+      "supporting_evidence": ["R4", "R5", "R9"],
+      "contradicting_evidence": [],
+      "confidence": 0.85
+    },
+    {
+      "id": "HR5",
+      "statement": "The 15-minute access token TTL is short enough that users returning after a moderate absence will always have an expired token, reliably triggering the concurrent refresh race.",
+      "supporting_evidence": ["R10"],
+      "contradicting_evidence": [],
+      "confidence": 0.9
+    }
+  ]
+}
