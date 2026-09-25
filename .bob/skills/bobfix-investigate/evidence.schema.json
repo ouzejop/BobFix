@@ -104,6 +104,10 @@
             "type": "number",
             "minimum": 0,
             "maximum": 1
+          },
+          "experiment": {
+            "type": "string",
+            "description": "Smallest test that passes only if the hypothesis is true"
           }
         }
       }

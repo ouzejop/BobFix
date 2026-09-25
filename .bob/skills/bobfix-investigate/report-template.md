@@ -15,26 +15,20 @@
     "affected_files": ["path/one.ts", "path/two.ts"]
   },
   "hypotheses": [
-    { "id": "HB1", "statement": "...", "status": "supported",    "evidence": ["B2", "D1"] },
-    { "id": "HF2", "statement": "...", "status": "rejected",     "evidence": ["F3"], "reason": "..." },
-    { "id": "HD2", "statement": "...", "status": "inconclusive", "evidence": [],     "reason": "..." }
+    { "id": "HB1", "statement": "...", "status": "confirmed", "evidence": ["B2", "D1"], "experiments": ["E1"] },
+    { "id": "HF2", "statement": "...", "status": "refuted",   "evidence": ["F3"], "experiments": ["E2"], "reason": "..." },
+    { "id": "HD2", "statement": "...", "status": "inconclusive", "evidence": [], "experiments": [], "reason": "..." }
   ],
   "fix_direction": {
     "summary": "What must change and where. No code.",
     "files": ["path/one.ts"],
     "regression_test_idea": "The scenario a test must reproduce (inputs -> expected vs actual)."
   },
-  "skeptic": {
-    "rounds": 2,
-    "challenges": 5,
-    "accepted": 2,
-    "refuted": 3,
-    "changes": ["What the conclusion or fix direction changed because of accepted challenges"]
-  },
   "stats": {
     "files_examined": 0,
     "evidence_count": 0,
-    "subagents": 3,
+    "subagents": 0,
+    "experiments": 0,
     "started_at": "ISO 8601",
     "finished_at": "ISO 8601"
   }
@@ -44,4 +38,5 @@
 Rules:
 - `confidence` is the investigator's judgement, not a computed value. Say so in the viewer.
 - Every item in `causal_chain` cites at least one evidence id that exists.
-- At least one hypothesis is examined and rejected, with its reason.
+- The root cause is confirmed by at least one experiment in experiments.json.
+- Refuted hypotheses cite the experiment that refuted them.

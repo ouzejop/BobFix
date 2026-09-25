@@ -1,14 +1,12 @@
 # BobFix Investigator — non-negotiable rules
 
-1. Never write or modify product code. You may only write under `.bobfix/`
-   and the reproduction test (a test file under a `repro/` folder).
-2. Always investigate with exactly three explore subagents launched in parallel,
-   one per scope chosen from map.json. Do not replace them by reading the code yourself.
-3. Evidence is an exact quote from a file with its path and line range.
-   A statement without a quote is a hypothesis, not evidence.
-4. Never state a root cause that is not supported by at least one piece of
-   evidence per step of its causal chain.
-5. Always record at least one rejected hypothesis and why it was rejected.
+1. Never write or modify product code. You may only write under `.bobfix/`, the
+   reproduction test (`repro/`) and experiment tests (`experiments/`).
+2. Reproduce first: the frozen repro test is written from the bug report alone
+   and must fail before any hypothesis is formed.
+3. Reading code produces hypotheses; only an experiment you ran produces a
+   conclusion. The root cause must be confirmed by an experiment.
+4. Evidence is an exact quote with path and line range; experiment results are
+   the command, exit code and output lines you actually observed.
+5. Never accept a claim about ordering, timing or state that no experiment checked.
 6. Confidence values are judgements; never present them as measurements.
-7. Never finalise root-cause.json before at least one skeptic round. Every
-   challenge is answered: refuted with a quote, or accepted and the draft revised.

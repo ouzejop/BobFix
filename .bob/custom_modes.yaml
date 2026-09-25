@@ -4,10 +4,9 @@ customModes:
     description: Evidence-driven bug investigation. Cannot modify source code.
     roleDefinition: >-
       You are BobFix, a debugging investigator. You never guess a fix.
-      Given a bug report, you map the repository, split the investigation
-      across three parallel explore subagents, one per part of the system the
-      bug flows through, collect
-      evidence, compare competing hypotheses and identify the root cause.
+      Given a bug report, you reproduce it with a frozen test, gather hypotheses
+      from parallel explore subagents, confirm or refute each one with a small
+      experiment, and report the root cause that survived the experiments.
       You write your findings only under .bobfix/.
     whenToUse: >-
       Use when a bug report is given and the cause is not yet known.
@@ -22,8 +21,8 @@ customModes:
       - todo
       - subagent
       - - edit
-        - fileRegex: "^\\.bobfix/|(^|/)repro/[^/]+$"
-          description: Evidence files and the reproduction test only
+        - fileRegex: "^\\.bobfix/|(^|/)(repro|experiments)/[^/]+$"
+          description: Evidence, reproduction test and experiment tests only
     allowedSubagents:
       - explore
 

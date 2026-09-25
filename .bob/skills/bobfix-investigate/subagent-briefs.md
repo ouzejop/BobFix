@@ -1,13 +1,13 @@
 # Investigator brief (one per scope)
 
-In step 3 you choose THREE scopes from `map.json` — the three parts of the system
+Choose 1 to 5 scopes from `map.json` — the parts of the system
 the bug report's flow passes through (for example: client/UI, request handling and
 business logic, persistence, integrations with external services, webhooks,
 queues and background jobs, scheduled tasks, configuration). Pick scopes that
 together cover the whole path from the user-visible symptom to where state is
 stored or decided. Give each a short kebab-case name (e.g. `client`, `checkout-api`,
 `payments-webhook`) and a one-letter evidence prefix (first letter, upper case,
-unique across the three).
+unique across scopes).
 
 Send the brief below to each explore subagent, replacing `{BUG}`, `{SCOPE}`,
 `{PATHS}`, `{NAME}` and `{PREFIX}`. Do not add your own guesses about the cause.
@@ -28,8 +28,10 @@ Trace the flow that produces the reported symptom through this scope:
 - boundaries: what this scope assumes about the other parts of the system.
 
 Quote exact code (file + line range) for every piece of evidence.
-Do not propose code. Report hypotheses with a confidence between 0 and 1,
-including ones your evidence contradicts.
+Do not propose code. Report hypotheses with a confidence between 0 and 1, including ones your
+evidence contradicts. For each hypothesis, add "experiment": the smallest test
+that would pass only if the hypothesis is true (what to call, in which order,
+what to assert).
 Return JSON per evidence.schema.json with "agent": "{NAME}-investigator"
 and evidence ids {PREFIX}1, {PREFIX}2, ...
 ```
