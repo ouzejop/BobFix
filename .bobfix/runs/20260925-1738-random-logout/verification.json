@@ -1,0 +1,46 @@
+{
+  "run_id": "20260925-1738-random-logout",
+  "base_ref": "e2635e3aab66bfde25e497bd0750ff43fe10dad3",
+  "fixed_ref": "b6177ddf9710ae74c98e5e18667a824e28c8c90d",
+  "regression_test": "demo-app/api/tests/concurrent-refresh.test.ts",
+  "verified_at": "2026-09-25T18:24:32.858Z",
+  "runs": {
+    "before": {
+      "exit_code": 1,
+      "duration_ms": 6348,
+      "total": 3,
+      "passed": 2,
+      "failed": 1,
+      "ran": true,
+      "log": "before.txt"
+    },
+    "after": {
+      "exit_code": 0,
+      "duration_ms": 5973,
+      "total": 3,
+      "passed": 3,
+      "failed": 0,
+      "ran": true,
+      "log": "after.txt"
+    },
+    "suite": {
+      "exit_code": 0,
+      "duration_ms": 9854,
+      "total": 20,
+      "passed": 20,
+      "failed": 0,
+      "ran": true,
+      "log": "suite.txt"
+    },
+    "build": {
+      "skipped": true
+    }
+  },
+  "checks": {
+    "bug_reproduced_before_fix": true,
+    "regression_test_passes_after_fix": true,
+    "full_suite_passes": true,
+    "build_ok": true
+  },
+  "status": "VERIFIED"
+}

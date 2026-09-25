@@ -1,0 +1,179 @@
+diff --git a/demo-app/api/src/db/refreshTokenRepo.ts b/demo-app/api/src/db/refreshTokenRepo.ts
+index f326236..1665602 100644
+--- a/demo-app/api/src/db/refreshTokenRepo.ts
++++ b/demo-app/api/src/db/refreshTokenRepo.ts
+@@ -36,6 +36,30 @@ export function makeRefreshTokenRepo(db: Database.Database) {
+     ).run(Date.now(), id);
+   };
+ 
++  /**
++   * Atomically claim the token by setting revoked_at only if it is still NULL.
++   * Returns 1 if this caller won the race, 0 if someone else already revoked it.
++   */
++  const claimRevoke = (id: number): number => {
++    const stmt = db.prepare(
++      "UPDATE refresh_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL"
++    );
++    return (stmt.run(Date.now(), id) as { changes: number }).changes;
++  };
++
++  /**
++   * Find the single live (unrevoked, unexpired) refresh-token row for a family.
++   * Used to detect concurrent re-submission: if a live successor already exists,
++   * the caller is a racing tab that lost the insert race, not a token thief.
++   */
++  const findLiveByFamily = (familyId: string): RefreshTokenRow | undefined => {
++    return db
++      .prepare<[string, number], RefreshTokenRow>(
++        "SELECT * FROM refresh_tokens WHERE family_id = ? AND revoked_at IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 1"
++      )
++      .get(familyId, Date.now());
++  };
++
+   const revokeFamily = (familyId: string): void => {
+     db.prepare(
+       "UPDATE token_families SET revoked_at = ? WHERE id = ?"
+@@ -60,7 +84,7 @@ export function makeRefreshTokenRepo(db: Database.Database) {
+     ).run(id, userId, Date.now());
+   };
+ 
+-  return { findByHash, insert, revoke, revokeFamily, isFamilyRevoked, createFamily };
++  return { findByHash, insert, revoke, claimRevoke, findLiveByFamily, revokeFamily, isFamilyRevoked, createFamily };
+ }
+ 
+ export type RefreshTokenRepo = ReturnType<typeof makeRefreshTokenRepo>;
+diff --git a/demo-app/api/src/services/tokenService.ts b/demo-app/api/src/services/tokenService.ts
+index b98e618..97b9010 100644
+--- a/demo-app/api/src/services/tokenService.ts
++++ b/demo-app/api/src/services/tokenService.ts
+@@ -1,7 +1,7 @@
+ import { SignJWT, jwtVerify, type JWTPayload } from "jose";
+ import { randomBytes, createHash } from "crypto";
+ import { ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL_DAYS, JWT_SECRET } from "../config.js";
+-import { makeRefreshTokenRepo, type RefreshTokenRepo } from "../db/refreshTokenRepo.js";
++import { makeRefreshTokenRepo, type RefreshTokenRow } from "../db/refreshTokenRepo.js";
+ import { makeUserRepo, type UserRow } from "../db/userRepo.js";
+ import Database from "better-sqlite3";
+ 
+@@ -53,20 +53,65 @@ export function makeTokenService(db: Database.Database) {
+     if (!row || row.expires_at < Date.now() || repo.isFamilyRevoked(row.family_id)) {
+       throw new InvalidToken();
+     }
+-    if (row.revoked_at) {
++
++    // Atomically claim the token AND insert the successor in one synchronous
++    // transaction — no await between the two DB writes.  Because Node.js is
++    // single-threaded, no other coroutine can observe an intermediate state
++    // where the old token is revoked but the new one does not yet exist.
++    // claimRevoke uses WHERE revoked_at IS NULL so it returns 0 for both:
++    //   (a) prior-rotation stale tokens (already revoked before this call)
++    //   (b) concurrent siblings that lost the race just now
++    // We distinguish them by checking whether a live successor was inserted
++    // recently (within CONCURRENT_GRACE_MS).
++    const CONCURRENT_GRACE_MS = 30_000;
++    const refresh = newRefreshToken();
++    const expiresAt = Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000;
++
++    const claimAndInsert = db.transaction(() => {
++      const claimed = repo.claimRevoke(row.id);
++      if (claimed === 0) {
++        // Claim failed — check for a live successor to determine race vs. theft.
++        return repo.findLiveByFamily(row.family_id) ?? null;
++      }
++      repo.insert({ familyId: row.family_id, userId: row.user_id, hash: sha256(refresh), expiresAt });
++      return null; // null signals "winner"
++    });
++
++    const successor: RefreshTokenRow | null = claimAndInsert();
++
++    if (successor !== null) {
++      // A live successor exists.  If it was inserted recently, this is a
++      // concurrent re-submission (the winner's transaction just committed).
++      // Issue fresh tokens so the losing tab also gets a valid session.
++      // If the successor is old (outside grace window), a real theft replayed
++      // a stale token — revoke the family.
++      if (successor.created_at < Date.now() - CONCURRENT_GRACE_MS) {
++        repo.revokeFamily(row.family_id);
++        throw new TokenReuseDetected();
++      }
++      const user = await users.findById(row.user_id);
++      const access = await signAccessToken(user, successor.family_id);
++      const loserRefresh = newRefreshToken();
++      repo.insert({
++        familyId: successor.family_id,
++        userId: row.user_id,
++        hash: sha256(loserRefresh),
++        expiresAt: Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,
++      });
++      return { access, refresh: loserRefresh };
++    }
++
++    if (successor === null && row.revoked_at !== null) {
++      // claimRevoke returned 0 AND findLiveByFamily returned nothing —
++      // the family has no live tokens left.  This is a stale theft with no
++      // active successor; revoke the family for safety.
+       repo.revokeFamily(row.family_id);
+       throw new TokenReuseDetected();
+     }
+-    repo.revoke(row.id);
++
++    // Winner path: async JWT signing after the synchronous DB work.
+     const user = await users.findById(row.user_id);
+     const access = await signAccessToken(user, row.family_id);
+-    const refresh = newRefreshToken();
+-    repo.insert({
+-      familyId: row.family_id,
+-      userId: user.id,
+-      hash: sha256(refresh),
+-      expiresAt: Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,
+-    });
+     return { access, refresh };
+   };
+ 
+diff --git a/demo-app/api/tests/auth.test.ts b/demo-app/api/tests/auth.test.ts
+index 52b65e3..b4c0546 100644
+--- a/demo-app/api/tests/auth.test.ts
++++ b/demo-app/api/tests/auth.test.ts
+@@ -1,4 +1,4 @@
+-import { describe, it, expect, beforeEach } from "vitest";
++import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+ import request from "supertest";
+ import { openDb } from "../src/db/connection.js";
+ import { seed } from "../src/db/seed.js";
+@@ -108,7 +108,11 @@ describe("protected routes", () => {
+ });
+ 
+ describe("refresh rotation", () => {
+-  it("refresh rotates token and old token yields 401", async () => {
++  afterEach(() => {
++    vi.useRealTimers();
++  });
++
++  it("refresh rotates token and old token yields 401 after grace window", async () => {
+     const { app } = setup();
+     const loginRes = await request(app)
+       .post("/auth/login")
+@@ -123,6 +127,11 @@ describe("refresh rotation", () => {
+     expect(refreshRes.status).toBe(200);
+     expect(refreshRes.body).toHaveProperty("accessToken");
+ 
++    // Advance time past the concurrent-grace window so the replay is treated
++    // as a stale token (theft), not a concurrent sibling.
++    vi.useFakeTimers();
++    vi.setSystemTime(Date.now() + 60_000);
++
+     const reuseRes = await request(app)
+       .post("/auth/refresh")
+       .set("Cookie", rtCookie!);
+@@ -151,6 +160,11 @@ describe("refresh rotation", () => {
+     const newCookies = firstRefreshRes.headers["set-cookie"] as string[];
+     const newRtCookie = newCookies.find((c: string) => c.startsWith("rt="))!;
+ 
++    // Advance time past the concurrent-grace window so the stale replay is
++    // treated as theft and revokes the family.
++    vi.useFakeTimers();
++    vi.setSystemTime(Date.now() + 60_000);
++
+     const reuseOldRes = await request(app)
+       .post("/auth/refresh")
+       .set("Cookie", originalRtCookie);
