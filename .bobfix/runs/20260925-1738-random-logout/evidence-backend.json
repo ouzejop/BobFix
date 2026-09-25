@@ -1,0 +1,158 @@
+{
+  "agent": "backend-investigator",
+  "scope": "backend authentication flow: middleware, controllers, token service, and database operations",
+  "files_examined": [
+    "demo-app/api/src/middleware/authMiddleware.ts",
+    "demo-app/api/src/controllers/authController.ts",
+    "demo-app/api/src/controllers/refreshController.ts",
+    "demo-app/api/src/services/tokenService.ts",
+    "demo-app/api/src/app.ts",
+    "demo-app/api/src/config.ts",
+    "demo-app/api/src/db/refreshTokenRepo.ts",
+    "demo-app/api/src/db/userRepo.ts",
+    "demo-app/api/src/db/connection.ts",
+    "demo-app/api/src/db/migrations/001_init.sql"
+  ],
+  "evidence": [
+    {
+      "id": "B1",
+      "kind": "config",
+      "file": "demo-app/api/src/config.ts",
+      "lines": "1-1",
+      "quote": "export const ACCESS_TOKEN_TTL = 15 * 60; // seconds",
+      "observation": "Access tokens expire after 900 seconds (15 minutes)"
+    },
+    {
+      "id": "B2",
+      "kind": "code",
+      "file": "demo-app/api/src/middleware/authMiddleware.ts",
+      "lines": "16-27",
+      "quote": "try {\n       const payload = await verifyAccessToken(token);\n       const fid = payload[\"fid\"] as string | undefined;\n       if (!fid || repo.isFamilyRevoked(fid)) {\n         res.status(401).json({ error: \"Unauthorized\" });\n         return;\n       }\n       (req as Request & { userId: number }).userId = Number(payload.sub);\n       next();\n     } catch {\n       res.status(401).json({ error: \"Unauthorized\" });\n     }",
+      "observation": "If token verification fails or family is revoked, a 401 Unauthorized response is sent with no error details"
+    },
+    {
+      "id": "B3",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "51-71",
+      "quote": "const rotate = async (oldToken: string) => {\n     const row = repo.findByHash(sha256(oldToken));\n     if (!row || row.expires_at < Date.now() || repo.isFamilyRevoked(row.family_id)) {\n       throw new InvalidToken();\n     }\n     if (row.revoked_at) {\n       repo.revokeFamily(row.family_id);\n       throw new TokenReuseDetected();\n     }\n     repo.revoke(row.id);\n     const user = await users.findById(row.user_id);\n     const access = await signAccessToken(user, row.family_id);\n     const refresh = newRefreshToken();\n     repo.insert({\n       familyId: row.family_id,\n       userId: user.id,\n       hash: sha256(refresh),\n       expiresAt: Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,\n     });\n     return { access, refresh };\n   };",
+      "observation": "Token rotation: (1) READ token by hash, (2) WRITE revoke token, (3) async WRITE insert new token. No transaction wrapping these operations."
+    },
+    {
+      "id": "B4",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "14-20",
+      "quote": "const findByHash = (hash: string): RefreshTokenRow | undefined => {\n     return db\n       .prepare<[string], RefreshTokenRow>(\n         \"SELECT * FROM refresh_tokens WHERE token_hash = ?\"\n       )\n       .get(hash);\n   };",
+      "observation": "Single SELECT query with no UNIQUE constraint enforcement during concurrent reads"
+    },
+    {
+      "id": "B5",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "33-37",
+      "quote": "const revoke = (id: number): void => {\n     db.prepare(\n       \"UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?\"\n     ).run(Date.now(), id);\n   };",
+      "observation": "Single UPDATE statement to revoke a token by id"
+    },
+    {
+      "id": "B6",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "22-31",
+      "quote": "const insert = (params: {\n     familyId: string;\n     userId: number;\n     hash: string;\n     expiresAt: number;\n   }): void => {\n     db.prepare(\n       \"INSERT INTO refresh_tokens (family_id, user_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)\"\n     ).run(params.familyId, params.userId, params.hash, Date.now(), params.expiresAt);\n   };",
+      "observation": "Single INSERT statement to add new refresh token"
+    },
+    {
+      "id": "B7",
+      "kind": "code",
+      "file": "demo-app/api/src/controllers/refreshController.ts",
+      "lines": "9-31",
+      "quote": "const refresh = async (req: Request, res: Response): Promise<void> => {\n     const oldToken = (req.cookies as Record<string, string>)[\"rt\"];\n     if (!oldToken) {\n       res.status(401).json({ error: \"No refresh token\" });\n       return;\n     }\n     try {\n       const { access, refresh: newRefresh } = await tokenService.rotate(oldToken);\n       res.cookie(\"rt\", newRefresh, {\n         httpOnly: true,\n         sameSite: \"strict\",\n         maxAge: REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,\n       });\n       res.json({ accessToken: access });\n     } catch (err) {\n       if (err instanceof InvalidToken || err instanceof TokenReuseDetected) {\n         res.clearCookie(\"rt\");\n         res.status(401).json({ error: \"Unauthorized\" });\n         return;\n       }\n       throw err;\n     }\n   };",
+      "observation": "Calls tokenService.rotate() which may throw InvalidToken or TokenReuseDetected, resulting in 401 and cookie clear"
+    },
+    {
+      "id": "B8",
+      "kind": "code",
+      "file": "demo-app/api/src/db/connection.ts",
+      "lines": "8-18",
+      "quote": "export function openDb(path: string): Database.Database {\n   const db = new Database(path);\n   db.pragma(\"journal_mode = WAL\");\n   db.pragma(\"foreign_keys = ON\");\n   const migration = readFileSync(\n     join(__dirname, \"migrations\", \"001_init.sql\"),\n     \"utf8\"\n   );\n   db.exec(migration);\n   return db;\n}",
+      "observation": "Database uses WAL (Write-Ahead Logging) mode and foreign keys are enabled, but no explicit transaction handling is set up"
+    },
+    {
+      "id": "B9",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "48-55",
+      "quote": "const isFamilyRevoked = (familyId: string): boolean => {\n     const row = db\n       .prepare<[string], { revoked_at: number | null }>(\"SELECT revoked_at FROM token_families WHERE id = ?\"\n       )\n       .get(familyId);\n     return row == null || row.revoked_at != null;\n   };",
+      "observation": "Reads revoked_at status from token_families table; can return true if row is null or if revoked_at is set"
+    },
+    {
+      "id": "B10",
+      "kind": "schema",
+      "file": "demo-app/api/src/db/migrations/001_init.sql",
+      "lines": "15-23",
+      "quote": "CREATE TABLE IF NOT EXISTS refresh_tokens (\n   id INTEGER PRIMARY KEY AUTOINCREMENT,\n   family_id TEXT NOT NULL REFERENCES token_families(id),\n   user_id INTEGER NOT NULL REFERENCES users(id),\n   token_hash TEXT UNIQUE NOT NULL,\n   created_at INTEGER NOT NULL,\n   expires_at INTEGER NOT NULL,\n   revoked_at INTEGER NULL\n);",
+      "observation": "token_hash has UNIQUE constraint but revoked_at is nullable. Multiple rows in same family possible."
+    },
+    {
+      "id": "B11",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "51-59",
+      "quote": "const rotate = async (oldToken: string) => {\n     const row = repo.findByHash(sha256(oldToken));\n     if (!row || row.expires_at < Date.now() || repo.isFamilyRevoked(row.family_id)) {\n       throw new InvalidToken();\n     }\n     if (row.revoked_at) {\n       repo.revokeFamily(row.family_id);\n       throw new TokenReuseDetected();\n     }",
+      "observation": "Race condition window: between checking row.revoked_at is null (line 56) and calling repo.revoke() (line 60), another request could have already revoked this token"
+    },
+    {
+      "id": "B12",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "60-71",
+      "quote": "     repo.revoke(row.id);\n     const user = await users.findById(row.user_id);\n     const access = await signAccessToken(user, row.family_id);\n     const refresh = newRefreshToken();\n     repo.insert({\n       familyId: row.family_id,\n       userId: user.id,\n       hash: sha256(refresh),\n       expiresAt: Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,\n     });",
+      "observation": "After revoking, waits for user lookup (async), signs token, generates new token, inserts. All unprotected operations."
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "HB1",
+      "statement": "Race condition in concurrent refresh requests: When two refresh requests for the same token arrive simultaneously, both execute the rotate() function in parallel. Request A reads the token as not revoked, Request B reads the same token as not revoked, then Request A revokes it and inserts a new token, then Request B also tries to revoke (successfully, redundantly) and insert a new token. The second insertion may fail or create an inconsistent state.",
+      "supporting_evidence": ["B3", "B11", "B12"],
+      "contradicting_evidence": [],
+      "confidence": 0.85
+    },
+    {
+      "id": "HB2",
+      "statement": "Token reuse detection fails under race conditions: If two identical refresh requests are sent before the first one completes, repo.findByHash() returns the same row in both threads. The first request revokes the token and inserts a new one. The second request, having already read the token as not revoked, proceeds to revoke it (line 60) and insert another token, bypassing the revoked_at check (line 56) which was done before the first request finished revoking.",
+      "supporting_evidence": ["B3", "B4", "B5", "B6", "B11"],
+      "contradicting_evidence": [],
+      "confidence": 0.8
+    },
+    {
+      "id": "HB3",
+      "statement": "No transaction wrapping the rotate operation: The rotate() function has multiple database operations (findByHash, revoke, insert) that are not wrapped in a transaction. Between the read and write operations, the database state can change, and concurrent requests see a stale view of the data.",
+      "supporting_evidence": ["B3", "B8"],
+      "contradicting_evidence": [],
+      "confidence": 0.9
+    },
+    {
+      "id": "HB4",
+      "statement": "Silent logout on token reuse: When TokenReuseDetected is thrown (line 24 of refreshController.ts), the response clears the cookie and returns 401 Unauthorized with generic error message. Users see no specific error, appearing as a random logout after page refresh.",
+      "supporting_evidence": ["B2", "B7"],
+      "contradicting_evidence": [],
+      "confidence": 0.95
+    },
+    {
+      "id": "HB5",
+      "statement": "Concurrent requests to the same refresh endpoint under expired access token conditions: When the access token expires (900 seconds per B1), the client sends a refresh request. If two browser tabs/windows do this simultaneously, or if the server is handling multiple requests from the same user in parallel, both hit the refresh endpoint with the same refresh token, triggering the race condition in rotate().",
+      "supporting_evidence": ["B1", "B3", "B7", "B11"],
+      "contradicting_evidence": [],
+      "confidence": 0.88
+    },
+    {
+      "id": "HB6",
+      "statement": "No explicit locking mechanism on refresh tokens: better-sqlite3 uses WAL mode but individual operations are not protected by explicit locks or transactions. Even though SQLite's ACID guarantees apply to individual statements, the multi-statement rotate() operation lacks atomicity.",
+      "supporting_evidence": ["B3", "B8", "B12"],
+      "contradicting_evidence": [],
+      "confidence": 0.85
+    }
+  ]
+}

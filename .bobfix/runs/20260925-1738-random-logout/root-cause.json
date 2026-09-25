@@ -1,0 +1,112 @@
+{
+  "run_id": "20260925-1738-random-logout",
+  "root_cause": {
+    "title": "Concurrent refresh requests from Dashboard's three parallel API calls trigger token-reuse detection and wipe the session cookie",
+    "explanation": "On page load (or reload when the access token has expired), Dashboard fires three concurrent api() calls via Promise.all. Because refreshSession() has no mutex or deduplication, all three calls that receive a 401 independently attempt to rotate the same refresh token at the same time. The backend rotate() function reads the token row, then revokes it, then inserts a new one — three separate statements with no transaction and no atomic check-and-set. When two or more concurrent calls read the token before any of them writes the revocation, the second caller arrives at its revoke-or-insert step and finds the token already revoked by the first caller; that triggers the TokenReuseDetected path, which clears the httpOnly rt cookie and returns 401. Back on the client, refreshSession() returns false, logout() is called, and the user is silently redirected to /login with no error message shown.",
+    "confidence": 0.92,
+    "causal_chain": [
+      {
+        "step": 1,
+        "layer": "frontend",
+        "evidence": ["F5"],
+        "what": "Dashboard.useEffect fires api('/me'), api('/orders'), api('/cart') concurrently via Promise.all with no error handler"
+      },
+      {
+        "step": 2,
+        "layer": "frontend",
+        "evidence": ["F1", "F6"],
+        "what": "On page reload, _accessToken is null (in-memory only, not persisted). All three requests are sent without an Authorization header and all receive 401"
+      },
+      {
+        "step": 3,
+        "layer": "frontend",
+        "evidence": ["F3", "F4"],
+        "what": "Each api() call that receives 401 independently calls refreshSession() — no lock, no deduplication. All three POST to /auth/refresh concurrently with the same rt httpOnly cookie"
+      },
+      {
+        "step": 4,
+        "layer": "backend",
+        "evidence": ["B3", "B11"],
+        "what": "rotate() reads the token row via findByHash, checks row.revoked_at is null, then calls repo.revoke() in a separate statement — no wrapping transaction. Multiple concurrent calls read the same row as not-revoked before any write has committed"
+      },
+      {
+        "step": 5,
+        "layer": "data",
+        "evidence": ["D5", "D3"],
+        "what": "The second concurrent rotate() either (a) finds row.revoked_at already set (set by the first caller), triggers revokeFamily() + throws TokenReuseDetected; or (b) tries to insert a duplicate token_hash and fails. Either way, one caller throws TokenReuseDetected"
+      },
+      {
+        "step": 6,
+        "layer": "backend",
+        "evidence": ["B7"],
+        "what": "refreshController catches TokenReuseDetected, clears the rt cookie, and returns 401. The rt httpOnly cookie is permanently wiped"
+      },
+      {
+        "step": 7,
+        "layer": "frontend",
+        "evidence": ["F3", "F5"],
+        "what": "The api() call whose refreshSession() returned false calls logout() -> window.location.href = '/login'. No error is shown because Promise.all has no .catch() handler"
+      }
+    ],
+    "affected_files": [
+      "demo-app/web/src/lib/apiClient.ts",
+      "demo-app/api/src/services/tokenService.ts"
+    ]
+  },
+  "hypotheses": [
+    {
+      "id": "HF2+HB1",
+      "statement": "Three concurrent refresh calls from Dashboard.useEffect race in rotate(), triggering token-reuse detection and clearing the rt cookie",
+      "status": "supported",
+      "evidence": ["F4", "F5", "B3", "B11", "D5", "B7"]
+    },
+    {
+      "id": "HB3",
+      "statement": "No transaction wrapping the rotate operation allows the read-revoke-insert sequence to be interleaved by concurrent requests",
+      "status": "supported",
+      "evidence": ["B3", "B8", "D11"]
+    },
+    {
+      "id": "HF1",
+      "statement": "The access token is only stored in memory; on page reload it is lost and all requests immediately get 401",
+      "status": "supported",
+      "evidence": ["F1", "F6"],
+      "reason": "This is correct and is the trigger that causes all three requests to hit 401 simultaneously, making the race likely on every reload after token expiry"
+    },
+    {
+      "id": "HD6",
+      "statement": "Users are randomly logged out simply because the access token expires and the frontend has no pre-emptive refresh. Given a valid refresh token, the refresh flow should succeed",
+      "status": "rejected",
+      "evidence": ["F3", "F4"],
+      "reason": "A refresh flow exists and works in isolation. The problem is that three concurrent refresh attempts are made for the same token, not that the refresh is absent. Rejected because evidence F3/F4 shows the refresh path exists and D9/D10 show it works sequentially in tests"
+    },
+    {
+      "id": "HF3",
+      "statement": "logout() is fire-and-forget, leaving the backend session inconsistent before redirect",
+      "status": "inconclusive",
+      "evidence": ["F2"],
+      "reason": "The rt cookie is already cleared by the backend before logout() is called. The missing await is a hygiene issue but is not the cause of the unexpected redirect to /login"
+    },
+    {
+      "id": "HD1",
+      "statement": "Refresh token row expires_at has passed (30+ days or clock skew) causing InvalidToken",
+      "status": "rejected",
+      "evidence": ["D8"],
+      "reason": "REFRESH_TOKEN_TTL_DAYS = 30 and the bug is reported as happening 'after a while' (15-minute access token expiry), not after 30 days. Expired refresh tokens would cause different, predictable logout — not 'random' ones"
+    }
+  ],
+  "fix_direction": {
+    "summary": "In apiClient.ts, the refreshSession() call must be deduplicated: a single in-flight promise should be shared across all concurrent callers, so that only one POST /auth/refresh is sent regardless of how many api() calls received 401 at the same time. Once the single refresh resolves (success or failure), all waiting callers should use its result. No change is needed on the backend — the reuse-detection logic is working correctly; the problem is that the client sends multiple concurrent refresh requests for the same token.",
+    "files": [
+      "demo-app/web/src/lib/apiClient.ts"
+    ],
+    "regression_test_idea": "Simulate Dashboard load when the access token has expired: set up a server where the first three authenticated requests all return 401, then call api() three times concurrently (Promise.all). Assert that exactly one POST /auth/refresh is made (not three), that all three api() calls eventually resolve successfully with the new access token, and that the rt cookie is not cleared."
+  },
+  "stats": {
+    "files_examined": 18,
+    "evidence_count": 33,
+    "subagents": 3,
+    "started_at": "2026-09-25T17:38:42Z",
+    "finished_at": "2026-09-25T17:45:00Z"
+  }
+}

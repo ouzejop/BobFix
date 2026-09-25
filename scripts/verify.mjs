@@ -69,7 +69,10 @@ try {
   const dest = join(wt, args.test);
   mkdirSync(dirname(dest), { recursive: true });
   copyFileSync(join(root, args.test), dest);
-  for (const dir of new Set([".", appRel])) {
+  // link node_modules of every directory from the repo root down to the app (npm workspaces hoist them)
+  const parts = appRel.split("/").filter((s) => s && s !== ".");
+  const dirs = ["."].concat(parts.map((_, i) => parts.slice(0, i + 1).join("/")));
+  for (const dir of dirs) {
     const src = join(root, dir, "node_modules");
     const dst = join(wt, dir, "node_modules");
     if (existsSync(src) && !existsSync(dst)) symlinkSync(src, dst, "dir");

@@ -1,0 +1,175 @@
+{
+  "agent": "data-investigator",
+  "scope": "schema, migrations, data-access code, and token validation logic",
+  "files_examined": [
+    "demo-app/api/src/db/migrations/001_init.sql",
+    "demo-app/api/src/db/connection.ts",
+    "demo-app/api/src/db/refreshTokenRepo.ts",
+    "demo-app/api/src/db/userRepo.ts",
+    "demo-app/api/tests/auth.test.ts",
+    "demo-app/api/tests/token-expiry.test.ts",
+    "demo-app/api/src/controllers/refreshController.ts",
+    "demo-app/api/src/services/tokenService.ts",
+    "demo-app/api/src/controllers/authController.ts",
+    "demo-app/api/src/middleware/authMiddleware.ts",
+    "demo-app/api/src/config.ts"
+  ],
+  "evidence": [
+    {
+      "id": "D1",
+      "kind": "schema",
+      "file": "demo-app/api/src/db/migrations/001_init.sql",
+      "lines": "8-13",
+      "quote": "CREATE TABLE IF NOT EXISTS token_families (\n  id TEXT PRIMARY KEY,\n  user_id INTEGER NOT NULL REFERENCES users(id),\n  created_at INTEGER NOT NULL,\n  revoked_at INTEGER NULL\n);",
+      "observation": "token_families table tracks family-level revocation with revoked_at column"
+    },
+    {
+      "id": "D2",
+      "kind": "schema",
+      "file": "demo-app/api/src/db/migrations/001_init.sql",
+      "lines": "15-23",
+      "quote": "CREATE TABLE IF NOT EXISTS refresh_tokens (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  family_id TEXT NOT NULL REFERENCES token_families(id),\n  user_id INTEGER NOT NULL REFERENCES users(id),\n  token_hash TEXT UNIQUE NOT NULL,\n  created_at INTEGER NOT NULL,\n  expires_at INTEGER NOT NULL,\n  revoked_at INTEGER NULL\n);",
+      "observation": "refresh_tokens table has individual revoked_at plus expires_at columns; expires_at is set per-token"
+    },
+    {
+      "id": "D3",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "39-46",
+      "quote": "const revokeFamily = (familyId: string): void => {\n  db.prepare(\n    \"UPDATE token_families SET revoked_at = ? WHERE id = ?\"\n  ).run(Date.now(), familyId);\n  db.prepare(\n    \"UPDATE refresh_tokens SET revoked_at = ? WHERE family_id = ? AND revoked_at IS NULL\"\n  ).run(Date.now(), familyId);\n};",
+      "observation": "revokeFamily executes TWO separate UPDATE statements without transaction wrapping; not atomic"
+    },
+    {
+      "id": "D4",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "48-55",
+      "quote": "const isFamilyRevoked = (familyId: string): boolean => {\n  const row = db\n    .prepare<[string], { revoked_at: number | null }>(\n      \"SELECT revoked_at FROM token_families WHERE id = ?\"\n    )\n    .get(familyId);\n  return row == null || row.revoked_at != null;\n};",
+      "observation": "isFamilyRevoked reads ONLY from token_families table, not from refresh_tokens; returns true if row doesn't exist or revoked_at is set"
+    },
+    {
+      "id": "D5",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "51-71",
+      "quote": "const rotate = async (oldToken: string) => {\n  const row = repo.findByHash(sha256(oldToken));\n  if (!row || row.expires_at < Date.now() || repo.isFamilyRevoked(row.family_id)) {\n    throw new InvalidToken();\n  }\n  if (row.revoked_at) {\n    repo.revokeFamily(row.family_id);\n    throw new TokenReuseDetected();\n  }\n  repo.revoke(row.id);\n  const user = await users.findById(row.user_id);\n  const access = await signAccessToken(user, row.family_id);\n  const refresh = newRefreshToken();\n  repo.insert({\n    familyId: row.family_id,\n    userId: user.id,\n    hash: sha256(refresh),\n    expiresAt: Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,\n  });\n  return { access, refresh };\n};",
+      "observation": "rotate() checks row.expires_at, isFamilyRevoked, row.revoked_at — all un-guarded by any transaction or lock"
+    },
+    {
+      "id": "D6",
+      "kind": "code",
+      "file": "demo-app/api/src/middleware/authMiddleware.ts",
+      "lines": "9-28",
+      "quote": "return async (req: Request, res: Response, next: NextFunction): Promise<void> => {\n  const auth = req.headers.authorization;\n  if (!auth || !auth.startsWith(\"Bearer \")) {\n    res.status(401).json({ error: \"Unauthorized\" });\n    return;\n  }\n  const token = auth.slice(7);\n  try {\n    const payload = await verifyAccessToken(token);\n    const fid = payload[\"fid\"] as string | undefined;\n    if (!fid || repo.isFamilyRevoked(fid)) {\n      res.status(401).json({ error: \"Unauthorized\" });\n      return;\n    }\n    (req as Request & { userId: number }).userId = Number(payload.sub);\n    next();\n  } catch {\n    res.status(401).json({ error: \"Unauthorized\" });\n  }\n};",
+      "observation": "authMiddleware returns generic 401 with no error details; any JWT verification error triggers catch block with no logging"
+    },
+    {
+      "id": "D7",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "78-83",
+      "quote": "export async function verifyAccessToken(token: string): Promise<JWTPayload> {\n  const { payload } = await jwtVerify(token, secretBytes, {\n    clockTolerance: 5,\n  });\n  return payload;\n}",
+      "observation": "verifyAccessToken uses jose.jwtVerify with 5-second clockTolerance; throws on any verification failure (including expiry)"
+    },
+    {
+      "id": "D8",
+      "kind": "config",
+      "file": "demo-app/api/src/config.ts",
+      "lines": "1-2",
+      "quote": "export const ACCESS_TOKEN_TTL = 15 * 60; // seconds\nexport const REFRESH_TOKEN_TTL_DAYS = 30;",
+      "observation": "ACCESS_TOKEN_TTL is 900 seconds (15 minutes); REFRESH_TOKEN_TTL_DAYS is 30 days"
+    },
+    {
+      "id": "D9",
+      "kind": "test",
+      "file": "demo-app/api/tests/token-expiry.test.ts",
+      "lines": "31-46",
+      "quote": "it(\"expired access token is rejected with 401\", async () => {\n  const { app } = setup();\n  const loginRes = await request(app)\n    .post(\"/auth/login\")\n    .send({ email: \"alice@shoply.test\", password: \"demo1234\" });\n  expect(loginRes.status).toBe(200);\n  const { accessToken } = loginRes.body as { accessToken: string };\n\n  vi.useFakeTimers();\n  vi.setSystemTime(Date.now() + 16 * 60 * 1000);\n\n  const res = await request(app)\n    .get(\"/me\")\n    .set(\"Authorization\", `Bearer ${accessToken}`);\n  expect(res.status).toBe(401);\n});",
+      "observation": "Test validates expired access token is rejected with 401; tests only the JWT expiry rejection, not the refresh token flow"
+    },
+    {
+      "id": "D10",
+      "kind": "test",
+      "file": "demo-app/api/tests/auth.test.ts",
+      "lines": "110-163",
+      "quote": "describe(\"refresh rotation\", () => {\n  it(\"refresh rotates token and old token yields 401\", async () => { ... });\n  it(\"refresh without cookie returns 401\", async () => { ... });\n  it(\"reusing old token after rotation revokes the family\", async () => { ... });\n  it(\"new access token from refresh is valid for /me\", async () => { ... });\n});",
+      "observation": "Tests cover refresh token rotation and family revocation, but no test for concurrent refresh requests using the same token"
+    },
+    {
+      "id": "D11",
+      "kind": "code",
+      "file": "demo-app/api/src/db/connection.ts",
+      "lines": "8-18",
+      "quote": "export function openDb(path: string): Database.Database {\n  const db = new Database(path);\n  db.pragma(\"journal_mode = WAL\");\n  db.pragma(\"foreign_keys = ON\");\n  const migration = readFileSync(\n    join(__dirname, \"migrations\", \"001_init.sql\"),\n    \"utf8\"\n  );\n  db.exec(migration);\n  return db;\n}",
+      "observation": "Database enables WAL mode; db.exec() runs migration but does NOT wrap operations in explicit transaction; better-sqlite3 default is auto-commit per statement"
+    },
+    {
+      "id": "D12",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "41-49",
+      "quote": "const issueForLogin = async (user: UserRow) => {\n  const familyId = randomBytes(16).toString(\"hex\");\n  repo.createFamily(familyId, user.id);\n  const refresh = newRefreshToken();\n  const expiresAt = Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000;\n  repo.insert({ familyId, userId: user.id, hash: sha256(refresh), expiresAt });\n  const access = await signAccessToken(user, familyId);\n  return { access, refresh };\n};",
+      "observation": "issueForLogin creates family, inserts refresh token, and generates access token via three separate operations with no wrapping transaction"
+    },
+    {
+      "id": "D13",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "14-20",
+      "quote": "const findByHash = (hash: string): RefreshTokenRow | undefined => {\n  return db\n    .prepare<[string], RefreshTokenRow>(\n      \"SELECT * FROM refresh_tokens WHERE token_hash = ?\"\n    )\n    .get(hash);\n};",
+      "observation": "findByHash does NOT filter by expires_at or revoked_at in the SQL query; returns full row and caller checks those fields in application code"
+    },
+    {
+      "id": "D14",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "33-37",
+      "quote": "const revoke = (id: number): void => {\n  db.prepare(\n    \"UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?\"\n  ).run(Date.now(), id);\n};",
+      "observation": "revoke() only revokes a single refresh token by id; does NOT check or modify token_families table"
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "HD1",
+      "statement": "When access token expires (after 15 minutes) and user refreshes the page, the client uses the still-valid refresh token to obtain a new access token. However, if the refresh_tokens table row has an expires_at that has also passed (e.g., after 30+ days or due to clock skew), the rotate() function will reject the token as InvalidToken, causing a silent 401.",
+      "supporting_evidence": ["D2", "D5", "D6", "D8"],
+      "contradicting_evidence": [],
+      "confidence": 0.75
+    },
+    {
+      "id": "HD2",
+      "statement": "The revokeFamily() function in refreshTokenRepo.ts is not atomic: it first updates token_families, then updates refresh_tokens in a separate statement. Between these two operations, a concurrent request could read token_families (via isFamilyRevoked), see it's not yet revoked, and proceed with a token it should not be able to use.",
+      "supporting_evidence": ["D3", "D4", "D11"],
+      "contradicting_evidence": [],
+      "confidence": 0.65
+    },
+    {
+      "id": "HD3",
+      "statement": "The rotate() function checks row.expires_at < Date.now() in application code, not in SQL. If the expires_at has just passed or is subject to clock skew between server processes, some instances may accept the token while others reject it.",
+      "supporting_evidence": ["D2", "D5", "D13"],
+      "contradicting_evidence": [],
+      "confidence": 0.5
+    },
+    {
+      "id": "HD4",
+      "statement": "The test suite does not cover the scenario of concurrent refresh requests with the same refresh token, leaving the race condition in rotate() completely untested.",
+      "supporting_evidence": ["D9", "D10"],
+      "contradicting_evidence": [],
+      "confidence": 0.8
+    },
+    {
+      "id": "HD5",
+      "statement": "revokeFamily() can leave the system in a partially-revoked state if interrupted between its two UPDATE statements, which could cause isFamilyRevoked() to return false while individual tokens have been revoked.",
+      "supporting_evidence": ["D3", "D4", "D5"],
+      "contradicting_evidence": [],
+      "confidence": 0.55
+    },
+    {
+      "id": "HD6",
+      "statement": "Users are randomly logged out simply because the access token expires and the frontend performs no pre-emptive refresh before expiry. This would explain why it happens after a while but not why it would fail silently given a valid refresh token.",
+      "supporting_evidence": ["D6", "D8"],
+      "contradicting_evidence": ["D9"],
+      "confidence": 0.4
+    }
+  ]
+}

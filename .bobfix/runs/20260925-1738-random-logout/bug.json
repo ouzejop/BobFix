@@ -1,0 +1,6 @@
+{
+  "run_id": "20260925-1738-random-logout",
+  "report": "Some users are randomly logged out after refreshing the page. It happens mostly when they come back to the app after a while (access token expired). No error is shown, they just land on the login page.",
+  "git_commit": "32ef101089e724ad7a0c48ecd1c88bbafe8d6de9",
+  "started_at": "2026-09-25T17:38:42Z"
+}
