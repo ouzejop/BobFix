@@ -1,112 +1,103 @@
 {
   "run_id": "20260925-1738-random-logout",
   "root_cause": {
-    "title": "Concurrent refresh requests from Dashboard's three parallel API calls trigger token-reuse detection and wipe the session cookie",
-    "explanation": "On page load (or reload when the access token has expired), Dashboard fires three concurrent api() calls via Promise.all. Because refreshSession() has no mutex or deduplication, all three calls that receive a 401 independently attempt to rotate the same refresh token at the same time. The backend rotate() function reads the token row, then revokes it, then inserts a new one — three separate statements with no transaction and no atomic check-and-set. When two or more concurrent calls read the token before any of them writes the revocation, the second caller arrives at its revoke-or-insert step and finds the token already revoked by the first caller; that triggers the TokenReuseDetected path, which clears the httpOnly rt cookie and returns 401. Back on the client, refreshSession() returns false, logout() is called, and the user is silently redirected to /login with no error message shown.",
-    "confidence": 0.92,
+    "title": "rotate() check-then-act race across two browser tabs: Tab B's synchronous revokeFamily() always runs before Tab A's repo.insert(), leaving Tab A's new token in a revoked family — both tabs lose their session",
+    "explanation": "When two browser tabs refresh at the same time with the same rt cookie, both call POST /auth/refresh concurrently. Inside rotate(), Tab A executes all synchronous statements through repo.revoke(row.id) at line 60, which commits the revocation to the DB, and then yields at 'await users.findById()' at line 61. Tab B then runs — it reads the same row via findByHash() and sees row.revoked_at already set (Tab A wrote it). Tab B enters the reuse-detection branch, calls revokeFamily() synchronously, and throws TokenReuseDetected; the controller clears Tab B's rt cookie and returns 401. Because Tab B's entire code path has no await, revokeFamily()'s two UPDATEs complete before Tab A ever resumes — this ordering is deterministic, not probabilistic. Tab A resumes, generates a new token, and calls repo.insert(); but the family is already marked revoked. The new token row enters the DB with revoked_at=NULL in a revoked family (the revokeFamily UPDATE only catches rows that existed at the time it ran). Tab A receives a 200 with a new access token, but that token's embedded fid points to a revoked family. authMiddleware's isFamilyRevoked(fid) check rejects it on the very next API call, leaving Tab A with a broken session. Neither tab shows an error: Tab B silently redirects to /login; Tab A's Dashboard Promise.all gets an unhandled rejection and shows a blank page.",
+    "confidence": 0.97,
     "causal_chain": [
       {
         "step": 1,
         "layer": "frontend",
-        "evidence": ["F5"],
-        "what": "Dashboard.useEffect fires api('/me'), api('/orders'), api('/cart') concurrently via Promise.all with no error handler"
+        "evidence": ["F4"],
+        "what": "Two browser tabs are independent JS contexts. Each fires POST /auth/refresh with the same rt httpOnly cookie. Client-side deduplication inside one tab cannot prevent this."
       },
       {
         "step": 2,
-        "layer": "frontend",
-        "evidence": ["F1", "F6"],
-        "what": "On page reload, _accessToken is null (in-memory only, not persisted). All three requests are sent without an Authorization header and all receive 401"
+        "layer": "backend",
+        "evidence": ["B2", "B3"],
+        "what": "Tab A enters rotate(). repo.revoke(row.id) at L60 is the last synchronous write. It commits revoked_at for the token row to the DB. Tab A then yields at 'await users.findById()' at L61."
       },
       {
         "step": 3,
-        "layer": "frontend",
-        "evidence": ["F3", "F4"],
-        "what": "Each api() call that receives 401 independently calls refreshSession() — no lock, no deduplication. All three POST to /auth/refresh concurrently with the same rt httpOnly cookie"
+        "layer": "backend",
+        "evidence": ["B4", "B5"],
+        "what": "Tab B runs while Tab A is suspended. findByHash() returns the row with revoked_at now set. Tab B enters the if(row.revoked_at) branch at L56, calls revokeFamily() synchronously. Tab B's entire path has no await, so revokeFamily()'s two UPDATEs complete in full before Tab A can resume."
       },
       {
         "step": 4,
-        "layer": "backend",
-        "evidence": ["B3", "B11"],
-        "what": "rotate() reads the token row via findByHash, checks row.revoked_at is null, then calls repo.revoke() in a separate statement — no wrapping transaction. Multiple concurrent calls read the same row as not-revoked before any write has committed"
+        "layer": "data",
+        "evidence": ["D1", "D2"],
+        "what": "revokeFamily() UPDATE at line 44 is 'WHERE family_id = ? AND revoked_at IS NULL'. It runs before Tab A's insert(). Tab A's new token does not yet exist — the UPDATE misses it."
       },
       {
         "step": 5,
         "layer": "data",
-        "evidence": ["D5", "D3"],
-        "what": "The second concurrent rotate() either (a) finds row.revoked_at already set (set by the first caller), triggers revokeFamily() + throws TokenReuseDetected; or (b) tries to insert a duplicate token_hash and fails. Either way, one caller throws TokenReuseDetected"
+        "evidence": ["D3", "D5"],
+        "what": "Tab A resumes and calls repo.insert(). The new token is inserted with revoked_at=NULL into a family whose token_families.revoked_at is now set. No schema constraint prevents this."
       },
       {
         "step": 6,
         "layer": "backend",
-        "evidence": ["B7"],
-        "what": "refreshController catches TokenReuseDetected, clears the rt cookie, and returns 401. The rt httpOnly cookie is permanently wiped"
+        "evidence": ["B7", "B8"],
+        "what": "Tab B gets 401 + clearCookie('rt'). Tab A gets 200 + a new access token. But Tab A's new access token embeds fid = the revoked family_id."
       },
       {
         "step": 7,
         "layer": "frontend",
-        "evidence": ["F3", "F5"],
-        "what": "The api() call whose refreshSession() returned false calls logout() -> window.location.href = '/login'. No error is shown because Promise.all has no .catch() handler"
+        "evidence": ["F1", "F2", "F3", "F4", "F5"],
+        "what": "Tab B: refreshSession() returns false → logout() → silent redirect to /login. Tab A: retries original API call with new token → authMiddleware isFamilyRevoked(fid) returns true → 401 → api() throws 'Request failed: 401' → Dashboard Promise.all has no .catch() → unhandled rejection, blank UI. No error message is shown in either tab."
       }
     ],
     "affected_files": [
-      "demo-app/web/src/lib/apiClient.ts",
       "demo-app/api/src/services/tokenService.ts"
     ]
   },
   "hypotheses": [
     {
-      "id": "HF2+HB1",
-      "statement": "Three concurrent refresh calls from Dashboard.useEffect race in rotate(), triggering token-reuse detection and clearing the rt cookie",
+      "id": "HB1+HD1",
+      "statement": "rotate()'s read-check-revoke-insert is not atomic. Tab B observes Tab A's intermediate write (revoked_at set, no new token yet) and triggers revokeFamily(), which runs to completion before Tab A can insert its new token.",
       "status": "supported",
-      "evidence": ["F4", "F5", "B3", "B11", "D5", "B7"]
+      "evidence": ["B2", "B3", "B4", "B5", "D1", "D2"]
     },
     {
-      "id": "HB3",
-      "statement": "No transaction wrapping the rotate operation allows the read-revoke-insert sequence to be interleaved by concurrent requests",
+      "id": "HD2",
+      "statement": "Tab A's new token is inserted into a revoked family. isFamilyRevoked() then returns true for all subsequent requests using Tab A's new access token.",
       "status": "supported",
-      "evidence": ["B3", "B8", "D11"]
+      "evidence": ["D3", "D4", "D5", "B8"]
     },
     {
-      "id": "HF1",
-      "statement": "The access token is only stored in memory; on page reload it is lost and all requests immediately get 401",
-      "status": "supported",
-      "evidence": ["F1", "F6"],
-      "reason": "This is correct and is the trigger that causes all three requests to hit 401 simultaneously, making the race likely on every reload after token expiry"
-    },
-    {
-      "id": "HD6",
-      "statement": "Users are randomly logged out simply because the access token expires and the frontend has no pre-emptive refresh. Given a valid refresh token, the refresh flow should succeed",
+      "id": "HF4",
+      "statement": "Client-side deduplication of refreshSession() (the original fix direction) prevents the race within a single tab but cannot prevent two separate browser tabs from both sending POST /auth/refresh.",
       "status": "rejected",
-      "evidence": ["F3", "F4"],
-      "reason": "A refresh flow exists and works in isolation. The problem is that three concurrent refresh attempts are made for the same token, not that the refresh is absent. Rejected because evidence F3/F4 shows the refresh path exists and D9/D10 show it works sequentially in tests"
+      "evidence": ["F4"],
+      "reason": "Each browser tab has its own JS heap. A shared in-flight promise in apiClient.ts is not shared across tabs. The bug is fully reproducible with two tabs regardless of any client-side fix."
     },
     {
       "id": "HF3",
-      "statement": "logout() is fire-and-forget, leaving the backend session inconsistent before redirect",
-      "status": "inconclusive",
-      "evidence": ["F2"],
-      "reason": "The rt cookie is already cleared by the backend before logout() is called. The missing await is a hygiene issue but is not the cause of the unexpected redirect to /login"
+      "statement": "Tab A is left with a broken session (blank Dashboard, not a login redirect) because api() throws without calling logout() when the retry fails at line 40.",
+      "status": "supported",
+      "evidence": ["F3", "F4", "F5"]
     },
     {
-      "id": "HD1",
-      "statement": "Refresh token row expires_at has passed (30+ days or clock skew) causing InvalidToken",
+      "id": "HD6-original",
+      "statement": "Users are randomly logged out simply because the access token expired with no retry path.",
       "status": "rejected",
-      "evidence": ["D8"],
-      "reason": "REFRESH_TOKEN_TTL_DAYS = 30 and the bug is reported as happening 'after a while' (15-minute access token expiry), not after 30 days. Expired refresh tokens would cause different, predictable logout — not 'random' ones"
+      "evidence": ["B2"],
+      "reason": "A refresh path exists and functions correctly for a single tab. The failure is specific to concurrent rotation of the same token."
     }
   ],
   "fix_direction": {
-    "summary": "In apiClient.ts, the refreshSession() call must be deduplicated: a single in-flight promise should be shared across all concurrent callers, so that only one POST /auth/refresh is sent regardless of how many api() calls received 401 at the same time. Once the single refresh resolves (success or failure), all waiting callers should use its result. No change is needed on the backend — the reuse-detection logic is working correctly; the problem is that the client sends multiple concurrent refresh requests for the same token.",
+    "summary": "Wrap the entire read-check-revoke-insert sequence inside rotate() in a single db.transaction() call in tokenService.ts. better-sqlite3 transactions are synchronous and exclusive: a second call to rotate() with the same token cannot interleave. The transaction should: (1) findByHash, (2) check expiry and family revocation, (3) check individual revoked_at, (4) revoke the old token, (5) insert the new token — all atomically. If the transaction detects row.revoked_at is already set (reuse), it calls revokeFamily() inside the same transaction and throws TokenReuseDetected. This removes the await-induced window entirely and makes the operation safe regardless of how many concurrent callers arrive.",
     "files": [
-      "demo-app/web/src/lib/apiClient.ts"
+      "demo-app/api/src/services/tokenService.ts"
     ],
-    "regression_test_idea": "Simulate Dashboard load when the access token has expired: set up a server where the first three authenticated requests all return 401, then call api() three times concurrently (Promise.all). Assert that exactly one POST /auth/refresh is made (not three), that all three api() calls eventually resolve successfully with the new access token, and that the rt cookie is not cleared."
+    "regression_test_idea": "In demo-app/api/tests with Vitest: login to get an rt cookie. Call tokenService.rotate() twice concurrently with the same raw refresh token string (using Promise.all on two direct calls to the service, not via HTTP). Assert that exactly one call resolves successfully and returns { access, refresh }, and the other throws either InvalidToken or TokenReuseDetected. Assert that after both settle, isFamilyRevoked() returns false (family is still usable), and that the successful rotate's new access token passes authMiddleware (isFamilyRevoked returns false)."
   },
   "stats": {
     "files_examined": 18,
-    "evidence_count": 33,
-    "subagents": 3,
+    "evidence_count": 41,
+    "subagents": 6,
     "started_at": "2026-09-25T17:38:42Z",
-    "finished_at": "2026-09-25T17:45:00Z"
+    "finished_at": "2026-09-25T17:55:00Z"
   }
 }

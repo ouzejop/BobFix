@@ -1,0 +1,81 @@
+{
+  "agent": "frontend-investigator",
+  "scope": "Frontend behavior per tab after the two-tab race resolves: what each tab does, cookie clearing, Tab A token usability",
+  "files_examined": [
+    "demo-app/web/src/lib/apiClient.ts",
+    "demo-app/web/src/lib/session.ts",
+    "demo-app/web/src/pages/Dashboard.tsx"
+  ],
+  "evidence": [
+    {
+      "id": "F1",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/apiClient.ts",
+      "lines": "25-30",
+      "quote": "  if (res.status === 401) {\n    const refreshed = await refreshSession();\n    if (!refreshed) {\n      logout();\n      throw new Error(\"Session expired\");\n    }",
+      "observation": "When Tab B's refreshSession() returns false (the /auth/refresh POST returned 401), the very next statement is logout(). No error message, no recovery attempt."
+    },
+    {
+      "id": "F2",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/session.ts",
+      "lines": "11-15",
+      "quote": "export function logout(): void {\n  _accessToken = null;\n  fetch(\"/auth/logout\", { method: \"POST\", credentials: \"include\" }).catch(() => {});\n  window.location.href = \"/login\";\n}",
+      "observation": "logout() redirects Tab B's browser to /login immediately. The rt cookie is already cleared server-side (httpOnly, inaccessible to JS). Tab B lands on login with no error shown."
+    },
+    {
+      "id": "F3",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/apiClient.ts",
+      "lines": "31-41",
+      "quote": "    const newToken = getAccessToken();\n    const retry = await fetch(path, {\n      ...options,\n      credentials: \"include\",\n      headers: {\n        ...options.headers,\n        ...(newToken ? { Authorization: `Bearer ${newToken}` } : {}),\n      },\n    });\n    if (!retry.ok) throw new Error(`Request failed: ${retry.status}`);\n    return retry.json() as Promise<T>;",
+      "observation": "Tab A's refreshSession() returned true (it got 200). Tab A retries the original API call with the new access token. But the new access token's fid embeds the now-revoked family_id. The retry hits authMiddleware which calls isFamilyRevoked(fid) and returns 401."
+    },
+    {
+      "id": "F4",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/apiClient.ts",
+      "lines": "40-41",
+      "quote": "    if (!retry.ok) throw new Error(`Request failed: ${retry.status}`);\n    return retry.json() as Promise<T>;",
+      "observation": "When the retry returns 401 (because isFamilyRevoked rejects the new token), api() throws 'Request failed: 401'. There is no second refresh attempt and no logout() call from this code path. The thrown error propagates to Dashboard.useEffect."
+    },
+    {
+      "id": "F5",
+      "kind": "code",
+      "file": "demo-app/web/src/pages/Dashboard.tsx",
+      "lines": "29-39",
+      "quote": "  useEffect(() => {\n    Promise.all([\n      api<Me>(\"/me\"),\n      api<Order[]>(\"/orders\"),\n      api<CartItem[]>(\"/cart\"),\n    ]).then(([meData, ordersData, cartData]) => {\n      setMe(meData);\n      setOrders(ordersData);\n      setCart(cartData);\n    });\n  }, []);",
+      "observation": "Promise.all has no .catch(). If any api() call throws (e.g. Tab A's retry returns 401 due to revoked family), the error is an unhandled promise rejection. Dashboard shows nothing — the user sees a blank page, not a login redirect."
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "HF1",
+      "statement": "Tab B is logged out silently: refreshSession() returns false → logout() → /login, with no error message. The rt cookie was already cleared server-side, invisible to JS.",
+      "supporting_evidence": ["F1", "F2"],
+      "contradicting_evidence": [],
+      "confidence": 1.0
+    },
+    {
+      "id": "HF2",
+      "statement": "Tab A receives a 200 from /auth/refresh and a new access token, but the new token's fid points to a revoked family. Tab A's retry of the original API call gets 401 from authMiddleware. api() throws 'Request failed: 401' without calling logout().",
+      "supporting_evidence": ["F3", "F4"],
+      "contradicting_evidence": [],
+      "confidence": 0.97
+    },
+    {
+      "id": "HF3",
+      "statement": "Tab A's Dashboard shows a blank/stale UI (unhandled rejection from Promise.all). Tab A is not redirected to /login by this code path, but every subsequent API call will also fail with 401 because the family is revoked. The user sees broken UI rather than a login redirect — a second symptom of the same bug.",
+      "supporting_evidence": ["F4", "F5"],
+      "contradicting_evidence": [],
+      "confidence": 0.9
+    },
+    {
+      "id": "HF4",
+      "statement": "Client-side deduplication of refreshSession() cannot fix the two-tab bug. Each tab is an independent JS context with its own module state. A shared in-flight promise only works within one tab.",
+      "supporting_evidence": ["F1", "F2"],
+      "contradicting_evidence": [],
+      "confidence": 1.0
+    }
+  ]
+}

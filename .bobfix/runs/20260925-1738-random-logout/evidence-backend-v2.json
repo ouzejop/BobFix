@@ -1,0 +1,113 @@
+{
+  "agent": "backend-investigator",
+  "scope": "concurrent rotate() calls from two browser tabs with same refresh token — precise await-interleaving analysis",
+  "files_examined": [
+    "demo-app/api/src/services/tokenService.ts",
+    "demo-app/api/src/controllers/refreshController.ts",
+    "demo-app/api/src/db/refreshTokenRepo.ts",
+    "demo-app/api/src/db/userRepo.ts"
+  ],
+  "evidence": [
+    {
+      "id": "B1",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "51-71",
+      "quote": "const rotate = async (oldToken: string) => {\n    const row = repo.findByHash(sha256(oldToken));\n    if (!row || row.expires_at < Date.now() || repo.isFamilyRevoked(row.family_id)) {\n      throw new InvalidToken();\n    }\n    if (row.revoked_at) {\n      repo.revokeFamily(row.family_id);\n      throw new TokenReuseDetected();\n    }\n    repo.revoke(row.id);\n    const user = await users.findById(row.user_id);\n    const access = await signAccessToken(user, row.family_id);\n    const refresh = newRefreshToken();\n    repo.insert({\n      familyId: row.family_id,\n      userId: user.id,\n      hash: sha256(refresh),\n      expiresAt: Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,\n    });\n    return { access, refresh };\n  };",
+      "observation": "Full rotate() body. The last synchronous statement before the first await is repo.revoke(row.id) at line 60. The first await is users.findById() at line 61."
+    },
+    {
+      "id": "B2",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "60-61",
+      "quote": "    repo.revoke(row.id);\n    const user = await users.findById(row.user_id);",
+      "observation": "repo.revoke(row.id) is the LAST synchronous write before the first await. After this line executes, the token row has revoked_at set in the DB and Tab A yields the event loop."
+    },
+    {
+      "id": "B3",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "33-37",
+      "quote": "const revoke = (id: number): void => {\n    db.prepare(\n      \"UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?\"\n    ).run(Date.now(), id);\n  };",
+      "observation": "revoke() is synchronous (better-sqlite3 .run() is blocking). The UPDATE is committed before revoke() returns. Tab A sees this write before yielding."
+    },
+    {
+      "id": "B4",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "56-58",
+      "quote": "    if (row.revoked_at) {\n      repo.revokeFamily(row.family_id);\n      throw new TokenReuseDetected();\n    }",
+      "observation": "Tab B reads the row after Tab A's revoke() has committed. row.revoked_at is now non-null. Tab B enters this branch, calls revokeFamily() synchronously, and throws TokenReuseDetected."
+    },
+    {
+      "id": "B5",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "39-46",
+      "quote": "const revokeFamily = (familyId: string): void => {\n    db.prepare(\n      \"UPDATE token_families SET revoked_at = ? WHERE id = ?\"\n    ).run(Date.now(), familyId);\n    db.prepare(\n      \"UPDATE refresh_tokens SET revoked_at = ? WHERE family_id = ? AND revoked_at IS NULL\"\n    ).run(Date.now(), familyId);\n  };",
+      "observation": "revokeFamily() is fully synchronous. Both UPDATEs complete before revokeFamily() returns. Because Node.js is single-threaded and Tab B's code path (L52-throw) has no await, Tab B's entire revokeFamily() executes to completion BEFORE Tab A can resume from its await."
+    },
+    {
+      "id": "B6",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "64-69",
+      "quote": "    repo.insert({\n      familyId: row.family_id,\n      userId: user.id,\n      hash: sha256(refresh),\n      expiresAt: Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,\n    });",
+      "observation": "Tab A's repo.insert() always runs AFTER Tab B's revokeFamily() has already committed both UPDATEs — this ordering is deterministic because Tab B's path is entirely synchronous while Tab A is suspended at an await."
+    },
+    {
+      "id": "B7",
+      "kind": "code",
+      "file": "demo-app/api/src/controllers/refreshController.ts",
+      "lines": "23-27",
+      "quote": "    } catch (err) {\n      if (err instanceof InvalidToken || err instanceof TokenReuseDetected) {\n        res.clearCookie(\"rt\");\n        res.status(401).json({ error: \"Unauthorized\" });\n        return;\n      }",
+      "observation": "When TokenReuseDetected is thrown by Tab B, refreshController clears the rt cookie and sends 401. Tab B's browser loses its rt cookie."
+    },
+    {
+      "id": "B8",
+      "kind": "code",
+      "file": "demo-app/api/src/controllers/refreshController.ts",
+      "lines": "15-22",
+      "quote": "    try {\n      const { access, refresh: newRefresh } = await tokenService.rotate(oldToken);\n      res.cookie(\"rt\", newRefresh, {\n        httpOnly: true,\n        sameSite: \"strict\",\n        maxAge: REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,\n      });\n      res.json({ accessToken: access });",
+      "observation": "Tab A's rotate() returns { access, refresh }. The new rt cookie is set and a new access token is issued. But the new token's fid (family_id) is the same family that Tab B just revoked."
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "HB1",
+      "statement": "repo.revoke(row.id) at L60 is the last synchronous statement before the first await (users.findById at L61). After L60 commits, the row has revoked_at set and Tab A yields.",
+      "supporting_evidence": ["B2", "B3"],
+      "contradicting_evidence": [],
+      "confidence": 1.0
+    },
+    {
+      "id": "HB2",
+      "statement": "Tab B's entire execution from L52 to the thrown TokenReuseDetected is synchronous (no await). It runs to completion — including revokeFamily() — while Tab A is suspended at its await.",
+      "supporting_evidence": ["B4", "B5"],
+      "contradicting_evidence": [],
+      "confidence": 1.0
+    },
+    {
+      "id": "HB3",
+      "statement": "Tab A's repo.insert() at L64 always executes AFTER Tab B's revokeFamily() has committed both UPDATEs. This ordering is deterministic, not probabilistic.",
+      "supporting_evidence": ["B5", "B6"],
+      "contradicting_evidence": [],
+      "confidence": 1.0
+    },
+    {
+      "id": "HB4",
+      "statement": "Tab A inserts a new refresh token (revoked_at=NULL) into a family that is already marked revoked. The new token escapes the revokeFamily UPDATE because it did not exist yet when that UPDATE ran. Tab A then returns a new access token whose fid points to a revoked family.",
+      "supporting_evidence": ["B6", "B8"],
+      "contradicting_evidence": [],
+      "confidence": 1.0
+    },
+    {
+      "id": "HB5",
+      "statement": "Tab A's new access token is immediately rejected by authMiddleware on the next request because isFamilyRevoked(fid) returns true (family was revoked by Tab B). Both tabs end up logged out.",
+      "supporting_evidence": ["B8"],
+      "contradicting_evidence": [],
+      "confidence": 0.97
+    }
+  ]
+}

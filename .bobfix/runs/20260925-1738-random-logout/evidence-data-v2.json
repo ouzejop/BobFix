@@ -1,0 +1,74 @@
+{
+  "agent": "data-investigator",
+  "scope": "Two-browser-tab concurrent refresh: does revokeFamily() revoke Tab A's newly inserted token? Ordering analysis.",
+  "files_examined": [
+    "demo-app/api/src/db/refreshTokenRepo.ts",
+    "demo-app/api/src/db/migrations/001_init.sql",
+    "demo-app/api/src/services/tokenService.ts"
+  ],
+  "evidence": [
+    {
+      "id": "D1",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "39-46",
+      "quote": "const revokeFamily = (familyId: string): void => {\n    db.prepare(\n      \"UPDATE token_families SET revoked_at = ? WHERE id = ?\"\n    ).run(Date.now(), familyId);\n    db.prepare(\n      \"UPDATE refresh_tokens SET revoked_at = ? WHERE family_id = ? AND revoked_at IS NULL\"\n    ).run(Date.now(), familyId);\n  };",
+      "observation": "revokeFamily() runs two synchronous UPDATEs in sequence. Statement 1 marks the family row revoked. Statement 2 marks all matching refresh_tokens with revoked_at IS NULL as revoked."
+    },
+    {
+      "id": "D2",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "43-45",
+      "quote": "    db.prepare(\n      \"UPDATE refresh_tokens SET revoked_at = ? WHERE family_id = ? AND revoked_at IS NULL\"\n    ).run(Date.now(), familyId);",
+      "observation": "The WHERE clause is 'family_id = ? AND revoked_at IS NULL'. This UPDATE only affects tokens that ALREADY EXIST at the moment it runs. A token inserted after this UPDATE is not affected."
+    },
+    {
+      "id": "D3",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "22-31",
+      "quote": "const insert = (params: {\n    familyId: string;\n    userId: number;\n    hash: string;\n    expiresAt: number;\n  }): void => {\n    db.prepare(\n      \"INSERT INTO refresh_tokens (family_id, user_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)\"\n    ).run(params.familyId, params.userId, params.hash, Date.now(), params.expiresAt);\n  };",
+      "observation": "insert() creates the new row with revoked_at implicitly NULL. It does NOT check whether the family is already revoked before inserting."
+    },
+    {
+      "id": "D4",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "48-55",
+      "quote": "const isFamilyRevoked = (familyId: string): boolean => {\n    const row = db\n      .prepare<[string], { revoked_at: number | null }>(\n        \"SELECT revoked_at FROM token_families WHERE id = ?\"\n      )\n      .get(familyId);\n    return row == null || row.revoked_at != null;\n  };",
+      "observation": "isFamilyRevoked() reads ONLY from token_families. After Tab B's revokeFamily() sets token_families.revoked_at, isFamilyRevoked() returns true for this family forever."
+    },
+    {
+      "id": "D5",
+      "kind": "schema",
+      "file": "demo-app/api/src/db/migrations/001_init.sql",
+      "lines": "15-23",
+      "quote": "CREATE TABLE IF NOT EXISTS refresh_tokens (\n   id INTEGER PRIMARY KEY AUTOINCREMENT,\n   family_id TEXT NOT NULL REFERENCES token_families(id),\n   user_id INTEGER NOT NULL REFERENCES users(id),\n   token_hash TEXT UNIQUE NOT NULL,\n   created_at INTEGER NOT NULL,\n   expires_at INTEGER NOT NULL,\n   revoked_at INTEGER NULL\n );",
+      "observation": "No CHECK constraint prevents inserting a new token into a revoked family. The foreign key only guarantees the family row exists, not that it is unrevoked."
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "HD1",
+      "statement": "Because Tab B's revokeFamily() is synchronous and runs to completion before Tab A resumes, Tab B's UPDATE always executes before Tab A's INSERT. Therefore Tab A's new token is NEVER caught by revokeFamily()'s UPDATE — it escapes into the DB with revoked_at=NULL in a revoked family.",
+      "supporting_evidence": ["D1", "D2", "D3"],
+      "contradicting_evidence": [],
+      "confidence": 1.0
+    },
+    {
+      "id": "HD2",
+      "statement": "Tab A's new token row is inserted with revoked_at=NULL into a family whose token_families.revoked_at is set. isFamilyRevoked() will return true for this family. Any future use of this token (for /me, /orders, /cart, or another refresh) will be rejected by isFamilyRevoked() check in authMiddleware.",
+      "supporting_evidence": ["D3", "D4", "D5"],
+      "contradicting_evidence": [],
+      "confidence": 1.0
+    },
+    {
+      "id": "HD3",
+      "statement": "The schema has no constraint to prevent this insertion. The only way to prevent Tab A from inserting into a revoked family is to check isFamilyRevoked() inside rotate() before insert(), or to wrap the entire read-check-revoke-insert sequence in a database transaction.",
+      "supporting_evidence": ["D5", "D3"],
+      "contradicting_evidence": [],
+      "confidence": 1.0
+    }
+  ]
+}
