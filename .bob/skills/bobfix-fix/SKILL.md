@@ -29,8 +29,22 @@ Run `node scripts/verify.mjs --run <run-id> --base <base_ref> --test <regression
 It writes `verification.json`. Do not edit that file.
 </Step>
 <Step>
-Report to the user using ONLY the values in `verification.json`:
-bug reproduced before fix, regression test after fix, full suite result,
-final status. If status is not VERIFIED, say what failed and stop.
+Copy `verification.json` to `verification-attempt-<n>.json` (n starts at 1).
+If status is VERIFIED, go to the report step.
+If NOT_VERIFIED, treat the failing output as NEW EVIDENCE, not as a nuisance:
+- `bug_reproduced_before_fix` false → the test does not reproduce the bug:
+  rewrite the test (never the fix) and re-run from the test step.
+- regression test or full suite failing after the fix → read the failing
+  assertion in `after.txt` / `suite.txt`, explain in `attempt-<n>.md` why the fix
+  did not remove the symptom (quote the code path), then revise the fix. You may
+  touch files listed in `root_cause.affected_files`, not others. Commit, re-run
+  the verification.
+Stop after 3 attempts. Never weaken or delete a test to pass.
+</Step>
+<Step>
+Report to the user using ONLY the values in the last `verification.json`:
+number of attempts and why each earlier one failed, bug reproduced before fix,
+regression test after fix, full suite result, final status. If the final status
+is not VERIFIED, say so plainly and stop.
 </Step>
 </Steps>
