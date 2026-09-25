@@ -17,7 +17,15 @@ Write `map.json`: the parts of the system and how to run one test file.
 <Step>
 REPRODUCE. Using ONLY the bug report, write ONE test that drives the system through
 its public interface (HTTP endpoint, CLI, UI component, public function) and
-asserts what the user expects. No guess about the cause. Put it in the test folder
+asserts what the user expects. No guess about the cause.
+Symptom first: find in the code what directly PRODUCES the reported symptom (e.g.
+which responses make the client log out, show an error, charge twice, drop data).
+Replay the WHOLE user scenario — every call the client makes in it, in the way it
+makes them (sequential, parallel, retried) — and assert that NONE of them produces
+that trigger. A fix that leaves the user-visible symptom in place must fail this
+test, even if part of the scenario succeeds. If the layer that shows the symptom
+cannot be tested in this repo, test at the next layer down and write in bug.json
+which client behaviour you are standing in for. Put it in the test folder
 under `repro/`. Run it: it MUST fail. If it passes, change the scenario (never the
 user-visible assertion), up to 3 tries. Record in `bug.json`:
 `repro_test: { path, sha256 }` (`sha256sum`) and the failing output.

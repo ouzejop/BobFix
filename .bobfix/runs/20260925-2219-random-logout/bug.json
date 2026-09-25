@@ -1,0 +1,19 @@
+{
+  "run_id": "20260925-2219-random-logout",
+  "started_at": "2026-09-25T22:19:48Z",
+  "git_sha": "d5610553998c592096b419dd89b5f59305722158",
+  "report": "Some users are randomly logged out after refreshing the page. It happens mostly when they come back to the app after a while (access token expired). No error is shown, they just land on the login page.",
+  "trigger": "User returns to app after absence (access token has expired). Browser/frontend calls POST /auth/refresh to get a new access token. Instead of succeeding, the user is silently redirected to login.",
+  "repro_test": {
+    "path": "demo-app/api/tests/repro/random-logout.test.ts",
+    "sha256": "34847cfdc2cc640f8e163dd53bc3e10d2e6cf1e7cc45349a6d97105ac6ee5fb1",
+    "command": "cd demo-app/api && npx vitest run tests/repro/random-logout.test.ts",
+    "exit_code": 1,
+    "key_output": [
+      "FAIL  tests/repro/random-logout.test.ts > repro: silent logout on concurrent /auth/refresh with same cookie > when two refresh requests race with the same rt cookie, the session survives — new token must still work",
+      "AssertionError: expected 401 to be 200 // Object.is equality",
+      "- Expected: 200",
+      "+ Received: 401"
+    ]
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "agent": "refresh-repo-investigator",
+  "scope": "refresh-repo",
+  "files_examined": [
+    "demo-app/api/src/db/refreshTokenRepo.ts",
+    "demo-app/api/src/db/migrations/001_init.sql",
+    "demo-app/api/src/services/tokenService.ts",
+    "demo-app/api/src/controllers/refreshController.ts"
+  ],
+  "evidence": [
+    {
+      "id": "R1",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "14-20",
+      "quote": "const findByHash = (hash: string): RefreshTokenRow | undefined => {\n    return db\n      .prepare<[string], RefreshTokenRow>(\n        \"SELECT * FROM refresh_tokens WHERE token_hash = ?\"\n      )\n      .get(hash);\n  };",
+      "observation": "Reads entire token row without any transaction or lock. Two concurrent requests can both read the same token row and both see revoked_at=NULL."
+    },
+    {
+      "id": "R2",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "33-37",
+      "quote": "const revoke = (id: number): void => {\n    db.prepare(\n      \"UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?\"\n    ).run(Date.now(), id);\n  };",
+      "observation": "Standalone UPDATE, not wrapped in a transaction. There is no atomic check-and-set; the row can be read by another connection after the SELECT but before this UPDATE."
+    },
+    {
+      "id": "R3",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "39-46",
+      "quote": "const revokeFamily = (familyId: string): void => {\n    db.prepare(\n      \"UPDATE token_families SET revoked_at = ? WHERE id = ?\"\n    ).run(Date.now(), familyId);\n    db.prepare(\n      \"UPDATE refresh_tokens SET revoked_at = ? WHERE family_id = ? AND revoked_at IS NULL\"\n    ).run(Date.now(), familyId);\n  };",
+      "observation": "Two separate UPDATEs to revoke a family. Newly inserted token from the concurrent winner request is revoked by the second UPDATE because its revoked_at IS NULL."
+    },
+    {
+      "id": "R4",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "48-55",
+      "quote": "const isFamilyRevoked = (familyId: string): boolean => {\n    const row = db\n      .prepare<[string], { revoked_at: number | null }>(\n        \"SELECT revoked_at FROM token_families WHERE id = ?\"\n      )\n      .get(familyId);\n    return row == null || row.revoked_at != null;\n  };",
+      "observation": "Separate SELECT to check family revocation. Not part of the same transaction as the token lookup. In the concurrent flow the family is not yet revoked at the time request-2 performs this check."
+    },
+    {
+      "id": "R5",
+      "kind": "schema",
+      "file": "demo-app/api/src/db/migrations/001_init.sql",
+      "lines": "15-23",
+      "quote": "CREATE TABLE IF NOT EXISTS refresh_tokens (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  ...\n  revoked_at INTEGER NULL\n);",
+      "observation": "No database-level constraint prevents duplicate rotation. The schema allows the race window to manifest."
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "HR1",
+      "statement": "The entire rotate() sequence — findByHash, check revoked_at, revoke, insert — is not wrapped in a database transaction. Two concurrent requests both read the same unrevoked token row. Request-1 revokes the token and inserts a new one. Request-2 then finds row.revoked_at != null (stale from the initial read, confirmed on re-check), calls revokeFamily() which revokes request-1's newly-inserted token too, throws TokenReuseDetected, and the controller returns 401 + clearCookie → silent logout.",
+      "supporting_evidence": ["R1", "R2", "R3", "R4"],
+      "contradicting_evidence": [],
+      "confidence": 0.95,
+      "experiment": "Execute rotate() twice concurrently with the same token. After both settle, query isFamilyRevoked for the family. If true, HR1 is confirmed — the family was erroneously revoked by a legitimate concurrent request."
+    },
+    {
+      "id": "HR2",
+      "statement": "The second UPDATE in revokeFamily() (line 44-45) sweeps all revoked_at IS NULL tokens in the family, which catches the brand-new token inserted by the winning request just moments before, leaving the user with no valid refresh token.",
+      "supporting_evidence": ["R3"],
+      "contradicting_evidence": [],
+      "confidence": 0.90,
+      "experiment": "After two concurrent refresh calls complete (one 200, one 401), count refresh_tokens rows WHERE family_id=X AND revoked_at IS NULL. If the count is 0, the new token was also swept — HR2 confirmed."
+    }
+  ]
+}

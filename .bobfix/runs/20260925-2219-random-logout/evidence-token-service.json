@@ -1,0 +1,70 @@
+{
+  "agent": "token-service-investigator",
+  "scope": "token-service",
+  "files_examined": [
+    "demo-app/api/src/services/tokenService.ts",
+    "demo-app/api/src/controllers/refreshController.ts",
+    "demo-app/api/src/config.ts",
+    "demo-app/api/src/db/refreshTokenRepo.ts"
+  ],
+  "evidence": [
+    {
+      "id": "T1",
+      "kind": "code",
+      "file": "demo-app/api/src/controllers/refreshController.ts",
+      "lines": "9-31",
+      "quote": "const refresh = async (req: Request, res: Response): Promise<void> => {\n    const oldToken = (req.cookies as Record<string, string>)[\"rt\"];\n    ...\n    try {\n      const { access, refresh: newRefresh } = await tokenService.rotate(oldToken);\n      ...\n    } catch (err) {\n      if (err instanceof InvalidToken || err instanceof TokenReuseDetected) {\n        res.clearCookie(\"rt\");\n        res.status(401).json({ error: \"Unauthorized\" });\n        return;\n      }\n    }\n  };",
+      "observation": "Entry point: POST /auth/refresh handler. Both InvalidToken AND TokenReuseDetected result in 401 + cleared cookie. No distinction shown to the user — both paths produce a silent logout."
+    },
+    {
+      "id": "T2",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "51-71",
+      "quote": "const rotate = async (oldToken: string) => {\n    const row = repo.findByHash(sha256(oldToken));\n    if (!row || row.expires_at < Date.now() || repo.isFamilyRevoked(row.family_id)) {\n      throw new InvalidToken();\n    }\n    if (row.revoked_at) {\n      repo.revokeFamily(row.family_id);\n      throw new TokenReuseDetected();\n    }\n    repo.revoke(row.id);\n    const user = await users.findById(row.user_id);\n    const access = await signAccessToken(user, row.family_id);\n    const refresh = newRefreshToken();\n    repo.insert({...});\n    return { access, refresh };\n  };",
+      "observation": "Non-atomic read-check-write: (1) findByHash at line 52, (2) revoked_at check at line 56, (3) revoke at line 60, (4) insert at line 64. Between steps 1 and 3 another concurrent request can read the same unrevoked token."
+    },
+    {
+      "id": "T3",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "56-59",
+      "quote": "if (row.revoked_at) {\n      repo.revokeFamily(row.family_id);\n      throw new TokenReuseDetected();\n    }",
+      "observation": "Reuse detection: if a token already has revoked_at != null, the whole family is nuked and TokenReuseDetected is thrown. In the concurrent scenario, request-2 reaches this point AFTER request-1 set revoked_at via repo.revoke(), triggering a false positive."
+    },
+    {
+      "id": "T4",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "14-20",
+      "quote": "const findByHash = (hash: string): RefreshTokenRow | undefined => {\n    return db\n      .prepare<[string], RefreshTokenRow>(\n        \"SELECT * FROM refresh_tokens WHERE token_hash = ?\"\n      )\n      .get(hash);\n  };",
+      "observation": "Plain SELECT with no transaction isolation. Two concurrent requests can both call this and both receive a row with revoked_at=NULL."
+    },
+    {
+      "id": "T5",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "33-37",
+      "quote": "const revoke = (id: number): void => {\n    db.prepare(\n      \"UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?\"\n    ).run(Date.now(), id);\n  };",
+      "observation": "Standalone UPDATE, not inside a transaction wrapping the whole rotate() sequence."
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "HT1",
+      "statement": "Two concurrent POST /auth/refresh requests with the same rt cookie both execute rotate(). Both call findByHash() before either calls revoke(). Both read row.revoked_at=NULL. Request-1 calls revoke() first. Request-2 then reads the token AGAIN via the stale in-memory row from step 1, reaches the row.revoked_at check (line 56) — which is now non-null in the DB — and triggers revokeFamily() → the newly issued token from request-1 is also revoked → 401.",
+      "supporting_evidence": ["T2", "T3", "T4", "T5"],
+      "contradicting_evidence": [],
+      "confidence": 0.95,
+      "experiment": "Call rotate() twice concurrently with the same token; assert the new token from the successful call is still valid (i.e. isFamilyRevoked returns false) after both calls complete."
+    },
+    {
+      "id": "HT2",
+      "statement": "The rotate() function lacks a database transaction, which means the read-check-write is not atomic. Wrapping all operations in a single IMMEDIATE transaction would force request-2 to wait and then find the token already revoked, throwing InvalidToken (not TokenReuseDetected), preserving the family.",
+      "supporting_evidence": ["T2", "T4", "T5"],
+      "contradicting_evidence": [],
+      "confidence": 0.90,
+      "experiment": "Wrap the body of rotate() in db.transaction(). Run the concurrent repro test. Confirm the repro test passes."
+    }
+  ]
+}

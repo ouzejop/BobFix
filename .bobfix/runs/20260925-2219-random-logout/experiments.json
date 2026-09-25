@@ -1,0 +1,43 @@
+[
+  {
+    "id": "E1",
+    "hypothesis": "HT1 / HR1",
+    "file": ".bobfix/runs/20260925-2219-random-logout/experiments/e1-concurrent-rotate-revokes-family.test.ts",
+    "command": "cd demo-app/api && npx vitest run tests/experiments/e1-concurrent-rotate-revokes-family.test.ts",
+    "exit_code": 0,
+    "key_output": [
+      "✓ tests/experiments/e1-concurrent-rotate-revokes-family.test.ts  (1 test) 452ms",
+      "Test Files  1 passed (1)"
+    ],
+    "verdict": "confirmed",
+    "notes": "After two concurrent rotate() calls with the same token: (1) one call succeeded, (2) the other threw TokenReuseDetected, (3) isFamilyRevoked() returned true. The family was erroneously revoked by a legitimate concurrent request."
+  },
+  {
+    "id": "E2",
+    "hypothesis": "HR2",
+    "file": ".bobfix/runs/20260925-2219-random-logout/experiments/e2-new-token-swept-by-revoke-family.test.ts",
+    "command": "cd demo-app/api && npx vitest run tests/experiments/e2-new-token-swept-by-revoke-family.test.ts",
+    "exit_code": 1,
+    "key_output": [
+      "FAIL  tests/experiments/e2-new-token-swept-by-revoke-family.test.ts",
+      "AssertionError: expected 1 to be +0",
+      "- Expected: 0",
+      "+ Received: 1"
+    ],
+    "verdict": "refuted",
+    "notes": "The second UPDATE in revokeFamily() did NOT sweep the new token row — it was inserted AFTER revokeFamily() ran (the winner's async user lookup + JWT signing runs between the loser's revokeFamily call and the winner's insert). The new token row exists but is unreachable because the family record is revoked (confirmed by E3)."
+  },
+  {
+    "id": "E3",
+    "hypothesis": "HR2 (refined) + HT1",
+    "file": ".bobfix/runs/20260925-2219-random-logout/experiments/e3-race-db-state.test.ts",
+    "command": "cd demo-app/api && npx vitest run tests/experiments/e3-race-db-state.test.ts",
+    "exit_code": 0,
+    "key_output": [
+      "✓ tests/experiments/e3-race-db-state.test.ts  (1 test) 443ms",
+      "Test Files  1 passed (1)"
+    ],
+    "verdict": "confirmed",
+    "notes": "Exactly one rotate() succeeded, one threw TokenReuseDetected. token_families.revoked_at is non-null (family revoked). One token row has revoked_at IS NULL (the new token from the winner) but it is blocked by the revoked family. Using the winner's new token with rotate() throws InvalidToken — the user is permanently locked out of their session."
+  }
+]

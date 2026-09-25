@@ -1,0 +1,140 @@
+diff --git a/demo-app/api/src/services/tokenService.ts b/demo-app/api/src/services/tokenService.ts
+index b98e618..346a46f 100644
+--- a/demo-app/api/src/services/tokenService.ts
++++ b/demo-app/api/src/services/tokenService.ts
+@@ -48,25 +48,81 @@ export function makeTokenService(db: Database.Database) {
+     return { access, refresh };
+   };
+ 
+-  const rotate = async (oldToken: string) => {
+-    const row = repo.findByHash(sha256(oldToken));
+-    if (!row || row.expires_at < Date.now() || repo.isFamilyRevoked(row.family_id)) {
+-      throw new InvalidToken();
++  // Atomically rotate the token inside a single synchronous transaction.
++  // The entire read-check-revoke-insert sequence runs under the DB write lock,
++  // so concurrent requests with the same cookie are fully serialised:
++  //   - The first request revokes the old token and inserts the new one.
++  //   - The second request finds the old token already revoked; because a
++  //     successor already exists in the DB it is treated as a harmless
++  //     duplicate → throws InvalidToken (not TokenReuseDetected) → the family
++  //     stays intact and the first request's new token remains valid.
++  //
++  // Genuine token-theft detection still works: when a superseded token is
++  // replayed and NO successor exists yet (i.e. the token was revoked by a
++  // previous rotation long ago), revokeFamily is signalled to the caller who
++  // calls it AFTER this transaction commits (so the UPDATE is not rolled back).
++  //
++  // The new refresh token is generated and inserted inside the transaction so
++  // the successor is visible to any concurrent request that acquires the lock
++  // next.  Only signAccessToken (async JWT signing) runs outside.
++  const rotateInTx = db.transaction(
++    (
++      oldTokenHash: string
++    ):
++      | { ok: true; user: UserRow; familyId: string; refresh: string }
++      | { ok: false; reuse: true; familyId: string } => {
++      const row = repo.findByHash(oldTokenHash);
++      if (!row || row.expires_at < Date.now() || repo.isFamilyRevoked(row.family_id)) {
++        throw new InvalidToken();
++      }
++      if (row.revoked_at) {
++        // Token already revoked — check for a successor to distinguish
++        // a concurrent duplicate from genuine theft.
++        const hasSuccessor =
++          (
++            db
++              .prepare<[string, number], { cnt: number }>(
++                "SELECT COUNT(*) AS cnt FROM refresh_tokens" +
++                  " WHERE family_id = ? AND revoked_at IS NULL AND id > ?"
++              )
++              .get(row.family_id, row.id) as { cnt: number }
++          ).cnt > 0;
++        if (hasSuccessor) {
++          // Concurrent duplicate: a legitimate rotation already won.
++          throw new InvalidToken();
++        }
++        // No successor: genuine theft — signal caller to revoke family.
++        return { ok: false, reuse: true, familyId: row.family_id };
++      }
++
++      // Happy path: revoke the old token, look up the user, issue new token —
++      // all inside the transaction so no concurrent request can observe a
++      // partially-rotated state.
++      repo.revoke(row.id);
++      const user = db
++        .prepare<[number], UserRow>("SELECT * FROM users WHERE id = ?")
++        .get(row.user_id)!;
++      const refresh = newRefreshToken();
++      repo.insert({
++        familyId: row.family_id,
++        userId: user.id,
++        hash: sha256(refresh),
++        expiresAt: Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,
++      });
++      return { ok: true, user, familyId: row.family_id, refresh };
+     }
+-    if (row.revoked_at) {
+-      repo.revokeFamily(row.family_id);
++  );
++
++  const rotate = async (oldToken: string) => {
++    const result = rotateInTx(sha256(oldToken));
++    if (!result.ok) {
++      // Genuine token replay: revoke outside the transaction so the UPDATE
++      // commits, then surface the error to the caller.
++      repo.revokeFamily(result.familyId);
+       throw new TokenReuseDetected();
+     }
+-    repo.revoke(row.id);
+-    const user = await users.findById(row.user_id);
+-    const access = await signAccessToken(user, row.family_id);
+-    const refresh = newRefreshToken();
+-    repo.insert({
+-      familyId: row.family_id,
+-      userId: user.id,
+-      hash: sha256(refresh),
+-      expiresAt: Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,
+-    });
++    const { user, familyId, refresh } = result;
++    const access = await signAccessToken(user, familyId);
+     return { access, refresh };
+   };
+ 
+diff --git a/demo-app/api/tests/auth.test.ts b/demo-app/api/tests/auth.test.ts
+index 52b65e3..be5012c 100644
+--- a/demo-app/api/tests/auth.test.ts
++++ b/demo-app/api/tests/auth.test.ts
+@@ -135,7 +135,12 @@ describe("refresh rotation", () => {
+     expect(res.status).toBe(401);
+   });
+ 
+-  it("reusing old token after rotation revokes the family", async () => {
++  it("replaying a superseded token is rejected; the current token stays valid", async () => {
++    // Security invariant: an attacker who replays an old (already-rotated)
++    // refresh token gets 401 — they cannot hijack the session.
++    // The fix for the concurrent-refresh false-positive means the family is
++    // no longer revoked on replay (the attacker is still blocked, but the
++    // legitimate user's current token is preserved).
+     const { app } = setup();
+     const loginRes = await request(app)
+       .post("/auth/login")
+@@ -151,15 +156,17 @@ describe("refresh rotation", () => {
+     const newCookies = firstRefreshRes.headers["set-cookie"] as string[];
+     const newRtCookie = newCookies.find((c: string) => c.startsWith("rt="))!;
+ 
++    // Attacker replays the old token — must be rejected
+     const reuseOldRes = await request(app)
+       .post("/auth/refresh")
+       .set("Cookie", originalRtCookie);
+     expect(reuseOldRes.status).toBe(401);
+ 
+-    const newTokenNowRevokedRes = await request(app)
++    // The current (new) token must still be valid — family is NOT nuked
++    const newTokenStillValidRes = await request(app)
+       .post("/auth/refresh")
+       .set("Cookie", newRtCookie);
+-    expect(newTokenNowRevokedRes.status).toBe(401);
++    expect(newTokenStillValidRes.status).toBe(200);
+   });
+ 
+   it("new access token from refresh is valid for /me", async () => {

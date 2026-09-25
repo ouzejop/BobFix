@@ -1,0 +1,89 @@
+{
+  "run_id": "20260925-2219-random-logout",
+  "root_cause": {
+    "title": "Non-atomic token rotation lets a concurrent second request falsely trigger TokenReuseDetected and revoke the entire token family",
+    "explanation": "When a user returns to the app after the access token has expired, the frontend fires POST /auth/refresh. In practice two concurrent requests can carry the same rt cookie — from two browser tabs, a page reload that triggers multiple parallel API calls, or a network retry. The rotate() function in tokenService.ts reads the token row (findByHash), checks if it is revoked, revokes it, and inserts a new one — all as separate, non-transactional SQLite statements. Both requests read the same row before either one writes, both see revoked_at=NULL, and both proceed past the check. Request-1 revokes the old token and inserts a new one. Request-2 then re-reads the now-revoked row via the stale in-memory snapshot, enters the row.revoked_at branch, calls revokeFamily() which sets token_families.revoked_at, and throws TokenReuseDetected. The controller catches it, clears the rt cookie, and returns 401. The user is silently redirected to login. The new token inserted by request-1 still exists as a row but is permanently blocked by the now-revoked family record.",
+    "confidence": 0.97,
+    "causal_chain": [
+      {
+        "step": 1,
+        "scope": "token-service",
+        "evidence": ["T2", "T4"],
+        "what": "rotate() calls findByHash() (a plain SELECT with no transaction). Two concurrent calls both execute this SELECT before either has written to the DB. Both receive a row with revoked_at=NULL."
+      },
+      {
+        "step": 2,
+        "scope": "token-service",
+        "evidence": ["T2", "T5"],
+        "what": "Both requests pass the revoked_at check at line 56 (it is NULL). Request-1 calls repo.revoke(row.id) — a standalone UPDATE that sets revoked_at on the old token row."
+      },
+      {
+        "step": 3,
+        "scope": "token-service",
+        "evidence": ["T3"],
+        "what": "Request-2 now reaches the revoked_at branch (the row was updated by request-1 between the two calls). It calls repo.revokeFamily() — setting token_families.revoked_at and trying to sweep unrevoked tokens — then throws TokenReuseDetected."
+      },
+      {
+        "step": 4,
+        "scope": "refresh-repo",
+        "evidence": ["R3", "R4"],
+        "what": "revokeFamily() sets token_families.revoked_at. The isFamilyRevoked() check used by authMiddleware will now return true for all tokens in this family — including the new token request-1 successfully inserted — making the session permanently invalid."
+      },
+      {
+        "step": 5,
+        "scope": "refresh-controller",
+        "evidence": ["T1"],
+        "what": "The controller catches TokenReuseDetected, clears the rt cookie, and returns 401. No error is shown to the user; the frontend silently redirects to the login page."
+      }
+    ],
+    "affected_files": [
+      "demo-app/api/src/services/tokenService.ts",
+      "demo-app/api/src/db/refreshTokenRepo.ts"
+    ]
+  },
+  "hypotheses": [
+    {
+      "id": "HT1",
+      "statement": "Two concurrent rotate() calls with the same rt cookie both pass the revoked_at=NULL check; request-1 revokes the token; request-2 sees it revoked, calls revokeFamily(), and throws TokenReuseDetected, logging the user out.",
+      "status": "confirmed",
+      "evidence": ["T2", "T3", "T4", "T5"],
+      "experiments": ["E1", "E3"]
+    },
+    {
+      "id": "HT2",
+      "statement": "Wrapping the rotate() body in a db.transaction() would force one request to wait while the other holds the write lock, preventing the race.",
+      "status": "inconclusive",
+      "evidence": ["T2"],
+      "experiments": [],
+      "reason": "Not experimentally tested — this is the fix direction, not a factual claim about current behaviour."
+    },
+    {
+      "id": "HR1",
+      "statement": "The race leaves isFamilyRevoked() === true for the family, making the session permanently invalid even after a successful rotation.",
+      "status": "confirmed",
+      "evidence": ["R1", "R3", "R4"],
+      "experiments": ["E1", "E3"]
+    },
+    {
+      "id": "HR2",
+      "statement": "revokeFamily()'s second UPDATE sweeps the newly inserted token row (revoked_at IS NULL) from the winning request.",
+      "status": "refuted",
+      "evidence": ["R3"],
+      "experiments": ["E2"],
+      "reason": "E2 found 1 active token row remaining (count=1, not 0). The new token is inserted by request-1 AFTER request-2's revokeFamily() runs (because request-1 has awaits for user lookup and JWT signing between repo.revoke and repo.insert). So the new token row survives, but the family-level revoked_at blocks it anyway — confirmed by E3."
+    }
+  ],
+  "fix_direction": {
+    "summary": "Wrap the entire body of tokenService.rotate() in a single SQLite IMMEDIATE transaction using better-sqlite3's db.transaction() helper. This serialises the read-check-revoke-insert sequence: the second concurrent request will either wait (if the first holds the write lock) or, after the lock is released, find the token already revoked and throw InvalidToken (not TokenReuseDetected) — which will return 401 to the second request only, leave the family intact, and leave the first request's new token valid. No change to the TokenReuseDetected or revokeFamily logic is needed; the fix is purely about making the existing check-and-write atomic.",
+    "files": ["demo-app/api/src/services/tokenService.ts"],
+    "regression_test_idea": "Login → fire two concurrent POST /auth/refresh with the same rt cookie → assert at least one returns 200 → assert the new rt cookie from that response can be used for a third POST /auth/refresh that also returns 200 (i.e. the family was NOT revoked by the losing request). This is exactly the frozen repro test at demo-app/api/tests/repro/random-logout.test.ts."
+  },
+  "stats": {
+    "files_examined": 9,
+    "evidence_count": 14,
+    "subagents": 2,
+    "experiments": 3,
+    "started_at": "2026-09-25T22:19:48Z",
+    "finished_at": "2026-09-25T22:28:00Z"
+  }
+}
