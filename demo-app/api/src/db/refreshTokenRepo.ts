@@ -36,6 +36,30 @@ export function makeRefreshTokenRepo(db: Database.Database) {
     ).run(Date.now(), id);
   };
 
+  /**
+   * Atomically claim the token by setting revoked_at only if it is still NULL.
+   * Returns 1 if this caller won the race, 0 if someone else already revoked it.
+   */
+  const claimRevoke = (id: number): number => {
+    const stmt = db.prepare(
+      "UPDATE refresh_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL"
+    );
+    return (stmt.run(Date.now(), id) as { changes: number }).changes;
+  };
+
+  /**
+   * Find the single live (unrevoked, unexpired) refresh-token row for a family.
+   * Used to detect concurrent re-submission: if a live successor already exists,
+   * the caller is a racing tab that lost the insert race, not a token thief.
+   */
+  const findLiveByFamily = (familyId: string): RefreshTokenRow | undefined => {
+    return db
+      .prepare<[string, number], RefreshTokenRow>(
+        "SELECT * FROM refresh_tokens WHERE family_id = ? AND revoked_at IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 1"
+      )
+      .get(familyId, Date.now());
+  };
+
   const revokeFamily = (familyId: string): void => {
     db.prepare(
       "UPDATE token_families SET revoked_at = ? WHERE id = ?"
@@ -60,7 +84,7 @@ export function makeRefreshTokenRepo(db: Database.Database) {
     ).run(id, userId, Date.now());
   };
 
-  return { findByHash, insert, revoke, revokeFamily, isFamilyRevoked, createFamily };
+  return { findByHash, insert, revoke, claimRevoke, findLiveByFamily, revokeFamily, isFamilyRevoked, createFamily };
 }
 
 export type RefreshTokenRepo = ReturnType<typeof makeRefreshTokenRepo>;

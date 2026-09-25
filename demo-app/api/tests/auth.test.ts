@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import request from "supertest";
 import { openDb } from "../src/db/connection.js";
 import { seed } from "../src/db/seed.js";
@@ -108,7 +108,11 @@ describe("protected routes", () => {
 });
 
 describe("refresh rotation", () => {
-  it("refresh rotates token and old token yields 401", async () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("refresh rotates token and old token yields 401 after grace window", async () => {
     const { app } = setup();
     const loginRes = await request(app)
       .post("/auth/login")
@@ -122,6 +126,11 @@ describe("refresh rotation", () => {
       .set("Cookie", rtCookie!);
     expect(refreshRes.status).toBe(200);
     expect(refreshRes.body).toHaveProperty("accessToken");
+
+    // Advance time past the concurrent-grace window so the replay is treated
+    // as a stale token (theft), not a concurrent sibling.
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 60_000);
 
     const reuseRes = await request(app)
       .post("/auth/refresh")
@@ -150,6 +159,11 @@ describe("refresh rotation", () => {
 
     const newCookies = firstRefreshRes.headers["set-cookie"] as string[];
     const newRtCookie = newCookies.find((c: string) => c.startsWith("rt="))!;
+
+    // Advance time past the concurrent-grace window so the stale replay is
+    // treated as theft and revokes the family.
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 60_000);
 
     const reuseOldRes = await request(app)
       .post("/auth/refresh")
