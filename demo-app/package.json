@@ -1,0 +1,8 @@
+{
+  "name": "shoply-demo",
+  "private": true,
+  "workspaces": ["api", "web"],
+  "scripts": {
+    "test": "npm -w api test"
+  }
+}
