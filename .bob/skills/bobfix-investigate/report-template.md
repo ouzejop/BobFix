@@ -4,13 +4,13 @@
 {
   "run_id": "20260926-1030-random-logout",
   "root_cause": {
-    "title": "One line, e.g. 'Refresh-token rotation race triggers reuse detection'",
+    "title": "One line naming the mechanism, not the symptom",
     "explanation": "3-5 sentences, plain language, no speculation.",
     "confidence": 0.0,
     "causal_chain": [
-      { "step": 1, "layer": "frontend", "evidence": ["F1"], "what": "..." },
-      { "step": 2, "layer": "backend",  "evidence": ["B2"], "what": "..." },
-      { "step": 3, "layer": "data",     "evidence": ["D1"], "what": "..." }
+      { "step": 1, "scope": "client", "evidence": ["F1"], "what": "..." },
+      { "step": 2, "scope": "api",      "evidence": ["B2"], "what": "..." },
+      { "step": 3, "scope": "store",    "evidence": ["D1"], "what": "..." }
     ],
     "affected_files": ["path/one.ts", "path/two.ts"]
   },

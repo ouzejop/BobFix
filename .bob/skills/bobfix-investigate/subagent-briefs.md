@@ -1,51 +1,35 @@
-# Subagent briefs
+# Investigator brief (one per scope)
 
-Each brief is sent to one `explore` subagent. Replace `{BUG}` with the bug
-report and `{PATHS}` with the relevant paths from `map.json`.
+In step 3 you choose THREE scopes from `map.json` — the three parts of the system
+the bug report's flow passes through (for example: client/UI, request handling and
+business logic, persistence, integrations with external services, webhooks,
+queues and background jobs, scheduled tasks, configuration). Pick scopes that
+together cover the whole path from the user-visible symptom to where state is
+stored or decided. Give each a short kebab-case name (e.g. `client`, `checkout-api`,
+`payments-webhook`) and a one-letter evidence prefix (first letter, upper case,
+unique across the three).
 
-Every subagent must end its answer with ONE fenced ```json block matching
-`evidence.schema.json`, and nothing after it.
-
-## Frontend investigator
-
-```
-Bug report: {BUG}
-Scope: frontend code only — {PATHS}
-Investigate how the client stores credentials, when it calls the API,
-how it reacts to 401/403 errors, how and how often it refreshes the session,
-and when it logs the user out. Pay attention to what happens on page reload
-and when several requests are in flight at the same time.
-Quote exact code (file + line range) for every piece of evidence.
-Do not propose code. Report hypotheses with a confidence between 0 and 1.
-Return JSON per evidence.schema.json with "agent": "frontend-investigator"
-and evidence ids F1, F2, ...
-```
-
-## Backend investigator
+Send the brief below to each explore subagent, replacing `{BUG}`, `{SCOPE}`,
+`{PATHS}`, `{NAME}` and `{PREFIX}`. Do not add your own guesses about the cause.
 
 ```
 Bug report: {BUG}
-Scope: backend code only — {PATHS}
-Investigate the authentication middleware, token validation, the session
-refresh endpoint and the services it calls. Trace the exact order of
-operations inside the refresh flow, including every await, and what happens
-when two refresh requests for the same session arrive at the same time.
-Quote exact code (file + line range) for every piece of evidence.
-Do not propose code. Report hypotheses with a confidence between 0 and 1.
-Return JSON per evidence.schema.json with "agent": "backend-investigator"
-and evidence ids B1, B2, ...
-```
+Scope: {SCOPE} only — {PATHS}
 
-## Data investigator
+Trace the flow that produces the reported symptom through this scope:
+- entry points: what triggers this code (user actions, requests, events,
+  callbacks, jobs, timers) and how often or how many times it can be triggered;
+- state: what it reads and writes, in what order, and what decides success or
+  failure;
+- ordering: every await / callback / network or database call, and what happens
+  if the same flow runs twice, concurrently, out of order, or is retried;
+- failure paths: what happens on errors, timeouts or unexpected responses, and
+  whether those paths are visible to the user or silently swallowed;
+- boundaries: what this scope assumes about the other parts of the system.
 
-```
-Bug report: {BUG}
-Scope: schema, migrations and data-access code — {PATHS}
-Investigate how sessions / tokens are persisted, which queries read and
-revoke them, whether revocation is per-token or cascades to other rows,
-and whether any operation that should be atomic is split across statements.
 Quote exact code (file + line range) for every piece of evidence.
-Do not propose code. Report hypotheses with a confidence between 0 and 1.
-Return JSON per evidence.schema.json with "agent": "data-investigator"
-and evidence ids D1, D2, ...
+Do not propose code. Report hypotheses with a confidence between 0 and 1,
+including ones your evidence contradicts.
+Return JSON per evidence.schema.json with "agent": "{NAME}-investigator"
+and evidence ids {PREFIX}1, {PREFIX}2, ...
 ```

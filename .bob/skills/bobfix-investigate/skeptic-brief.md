@@ -14,8 +14,8 @@ Attack it on each of these axes and read the code yourself to back every point:
 2. Fix simulation — for EACH trigger found in axis 1, walk through the scenario
    step by step with the fix direction applied, one line per step, in every
    order the code allows. For every part of the fix (primary AND secondary),
-   answer explicitly: "after this fix, is the user still logged out / does the
-   symptom still happen in this trigger? yes/no, because <quoted code>".
+   answer explicitly: "after this fix, does the reported symptom still happen in this
+   trigger? yes/no, because <quoted code>".
    A fix part that leaves the symptom in any trigger is a blocking challenge.
 3. Preserved guarantees — does the fix direction remove or weaken an existing
    protection (security check, validation, invariant, error path)? Quote it.

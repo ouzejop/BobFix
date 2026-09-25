@@ -13,18 +13,20 @@ the current git commit (`git rev-parse HEAD`) and the start time (ISO 8601).
 </Step>
 <Step>
 Map the repository in at most 3 tool calls (top-level tree, package manifests,
-test layout). Write `map.json`: layers found (frontend, backend, data, tests)
+test layout). Write `map.json`: the parts of the system (clients, APIs, services, persistence,
+integrations, jobs, tests and how they run)
 and the entry points relevant to the bug.
 </Step>
 <Step>
-Spawn exactly THREE explore subagents IN PARALLEL, in a single step — one per
-layer: frontend, backend, data. Use the briefs in `subagent-briefs.md`. Pass
-each one the bug report and the paths from `map.json`. Do not investigate the
-layers yourself before they return.
+Choose THREE investigation scopes from `map.json`, following `subagent-briefs.md`,
+and record them in `map.json` (name, prefix, paths, why this scope is on the
+path of the bug). Then spawn exactly THREE explore subagents IN PARALLEL, in a
+single step — one per scope, with the brief in `subagent-briefs.md`.
+Do not investigate the scopes yourself before they return.
 </Step>
 <Step>
 When all three return, save each returned JSON block verbatim as
-`evidence-frontend.json`, `evidence-backend.json`, `evidence-data.json`.
+`evidence-<scope-name>.json`.
 Each must match `evidence.schema.json`. If a subagent returned invalid JSON,
 fix only the formatting, never the content.
 </Step>

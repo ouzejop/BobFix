@@ -2,27 +2,70 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "BobFix evidence (one per investigator)",
   "type": "object",
-  "required": ["agent", "scope", "files_examined", "evidence", "hypotheses"],
+  "required": [
+    "agent",
+    "scope",
+    "files_examined",
+    "evidence",
+    "hypotheses"
+  ],
   "additionalProperties": false,
   "properties": {
     "agent": {
-      "enum": ["frontend-investigator", "backend-investigator", "data-investigator"]
+      "type": "string",
+      "pattern": "^[a-z0-9-]+-investigator$"
     },
-    "scope": { "type": "string" },
-    "files_examined": { "type": "array", "items": { "type": "string" } },
+    "scope": {
+      "type": "string"
+    },
+    "files_examined": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "evidence": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "kind", "file", "lines", "quote", "observation"],
+        "required": [
+          "id",
+          "kind",
+          "file",
+          "lines",
+          "quote",
+          "observation"
+        ],
         "additionalProperties": false,
         "properties": {
-          "id": { "type": "string", "pattern": "^[FBD][0-9]+$" },
-          "kind": { "enum": ["code", "config", "schema", "test", "execution"] },
-          "file": { "type": "string" },
-          "lines": { "type": "string", "pattern": "^[0-9]+(-[0-9]+)?$" },
-          "quote": { "type": "string", "description": "Exact code copied from the file" },
-          "observation": { "type": "string", "description": "What this code does, stated as fact" }
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Z][0-9]+$"
+          },
+          "kind": {
+            "enum": [
+              "code",
+              "config",
+              "schema",
+              "test",
+              "execution"
+            ]
+          },
+          "file": {
+            "type": "string"
+          },
+          "lines": {
+            "type": "string",
+            "pattern": "^[0-9]+(-[0-9]+)?$"
+          },
+          "quote": {
+            "type": "string",
+            "description": "Exact code copied from the file"
+          },
+          "observation": {
+            "type": "string",
+            "description": "What this code does, stated as fact"
+          }
         }
       }
     },
@@ -30,14 +73,38 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "statement", "supporting_evidence", "confidence"],
+        "required": [
+          "id",
+          "statement",
+          "supporting_evidence",
+          "confidence"
+        ],
         "additionalProperties": false,
         "properties": {
-          "id": { "type": "string", "pattern": "^H[FBD][0-9]+$" },
-          "statement": { "type": "string" },
-          "supporting_evidence": { "type": "array", "items": { "type": "string" } },
-          "contradicting_evidence": { "type": "array", "items": { "type": "string" } },
-          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+          "id": {
+            "type": "string",
+            "pattern": "^H[A-Z][0-9]+$"
+          },
+          "statement": {
+            "type": "string"
+          },
+          "supporting_evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "contradicting_evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
         }
       }
     }
