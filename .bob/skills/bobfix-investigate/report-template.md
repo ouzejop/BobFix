@@ -24,6 +24,13 @@
     "files": ["path/one.ts"],
     "regression_test_idea": "The scenario a test must reproduce (inputs -> expected vs actual)."
   },
+  "skeptic": {
+    "rounds": 2,
+    "challenges": 5,
+    "accepted": 2,
+    "refuted": 3,
+    "changes": ["What the conclusion or fix direction changed because of accepted challenges"]
+  },
   "stats": {
     "files_examined": 0,
     "evidence_count": 0,

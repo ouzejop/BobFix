@@ -37,13 +37,32 @@ If a hypothesis can be checked by running an existing test or a short command,
 run it and record the output as evidence of kind `execution`.
 </Step>
 <Step>
-Write `root-cause.json` following `report-template.md`: the root cause, the
-causal chain across files, confidence, rejected hypotheses with the reason,
+Write a DRAFT `root-cause.json` following `report-template.md`: the root cause,
+the causal chain across files, confidence, rejected hypotheses with the reason,
 and the fix direction (what should change, where — no code).
 </Step>
 <Step>
+Skeptic review — never skip. Spawn ONE explore subagent with the brief in
+`skeptic-brief.md`, passing the full draft `root-cause.json` and the paths of
+the evidence files. Its job is to break the draft, not to agree with it.
+Save its JSON verbatim as `challenges-round-<n>.json`.
+</Step>
+<Step>
+Answer every challenge in `challenges-round-<n>.json`, in `rebuttals-round-<n>.json`:
+either `refuted` (quote the code that proves the challenge wrong) or `accepted`
+(then revise the draft: explanation, causal chain, fix direction or regression
+test idea). You may read code yourself to answer. A challenge without a quoted
+refutation is accepted.
+If any challenge was accepted, run the skeptic again on the revised draft
+(round n+1). Stop when a round has no accepted challenge, or after 3 rounds.
+</Step>
+<Step>
+Finalise `root-cause.json`. Add a `skeptic` section: rounds run, challenges
+raised, accepted, refuted, and what changed in the conclusion because of them.
+</Step>
+<Step>
 Print a short summary to the user: root cause in one sentence, confidence,
-affected files, rejected hypotheses. End with:
+affected files, rejected hypotheses, and what the skeptic changed (if anything). End with:
 "Switch to BobFix Fixer to apply and verify the fix."
 </Step>
 </Steps>

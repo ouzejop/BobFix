@@ -9,3 +9,5 @@
    evidence per step of its causal chain.
 5. Always record at least one rejected hypothesis and why it was rejected.
 6. Confidence values are judgements; never present them as measurements.
+7. Never finalise root-cause.json before at least one skeptic round. Every
+   challenge is answered: refuted with a quote, or accepted and the draft revised.
