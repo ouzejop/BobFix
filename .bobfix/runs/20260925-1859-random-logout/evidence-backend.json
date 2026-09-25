@@ -1,0 +1,111 @@
+{
+  "agent": "backend-investigator",
+  "scope": "backend authentication and token refresh flow",
+  "files_examined": [
+    "demo-app/api/src/middleware/authMiddleware.ts",
+    "demo-app/api/src/controllers/refreshController.ts",
+    "demo-app/api/src/controllers/authController.ts",
+    "demo-app/api/src/services/tokenService.ts",
+    "demo-app/api/src/db/refreshTokenRepo.ts",
+    "demo-app/api/src/config.ts",
+    "demo-app/api/src/app.ts",
+    "demo-app/api/tests/auth.test.ts",
+    "demo-app/api/tests/token-expiry.test.ts"
+  ],
+  "evidence": [
+    {
+      "id": "B1",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "51-71",
+      "quote": "const rotate = async (oldToken: string) => {\n    const row = repo.findByHash(sha256(oldToken));\n    if (!row || row.expires_at < Date.now() || repo.isFamilyRevoked(row.family_id)) {\n      throw new InvalidToken();\n    }\n    if (row.revoked_at) {\n      repo.revokeFamily(row.family_id);\n      throw new TokenReuseDetected();\n    }\n    repo.revoke(row.id);\n    const user = await users.findById(row.user_id);\n    const access = await signAccessToken(user, row.family_id);\n    const refresh = newRefreshToken();\n    repo.insert({\n      familyId: row.family_id,\n      userId: user.id,\n      hash: sha256(refresh),\n      expiresAt: Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,\n    });\n    return { access, refresh };\n  };",
+      "observation": "The rotate function performs multiple sequential database operations without transaction protection: (1) findByHash (line 52), (2) revoke (line 60), (3) findById await (line 61), (4) signAccessToken await (line 62), (5) insert (line 64). Between steps (1) and (4) there is an unprotected gap where another concurrent request can modify the database state."
+    },
+    {
+      "id": "B2",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "33-37",
+      "quote": "const revoke = (id: number): void => {\n    db.prepare(\n      \"UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?\"\n    ).run(Date.now(), id);\n  };",
+      "observation": "The revoke function marks a single token as revoked. This is called at line 60 of tokenService.ts, but the new token is not inserted until line 64, after two awaits that block execution."
+    },
+    {
+      "id": "B3",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "48-55",
+      "quote": "const isFamilyRevoked = (familyId: string): boolean => {\n    const row = db\n      .prepare<[string], { revoked_at: number | null }>(\n        \"SELECT revoked_at FROM token_families WHERE id = ?\"\n      )\n      .get(familyId);\n    return row == null || row.revoked_at != null;\n  };",
+      "observation": "This function is called in authMiddleware (line 19) to check if a family is revoked. It performs a synchronous SELECT but can be preempted by concurrent requests modifying token_families table."
+    },
+    {
+      "id": "B4",
+      "kind": "code",
+      "file": "demo-app/api/src/middleware/authMiddleware.ts",
+      "lines": "16-28",
+      "quote": "try {\n      const payload = await verifyAccessToken(token);\n      const fid = payload[\"fid\"] as string | undefined;\n      if (!fid || repo.isFamilyRevoked(fid)) {\n        res.status(401).json({ error: \"Unauthorized\" });\n        return;\n      }\n      (req as Request & { userId: number }).userId = Number(payload.sub);\n      next();\n    } catch {\n      res.status(401).json({ error: \"Unauthorized\" });\n    }",
+      "observation": "The authMiddleware calls verifyAccessToken (line 17, which is an await), then checks isFamilyRevoked (line 19). Between these operations, another request can rotate the token and invalidate the family."
+    },
+    {
+      "id": "B5",
+      "kind": "code",
+      "file": "demo-app/api/src/controllers/refreshController.ts",
+      "lines": "9-30",
+      "quote": "const refresh = async (req: Request, res: Response): Promise<void> => {\n    const oldToken = (req.cookies as Record<string, string>)[\"rt\"];\n    if (!oldToken) {\n      res.status(401).json({ error: \"No refresh token\" });\n      return;\n    }\n    try {\n      const { access, refresh: newRefresh } = await tokenService.rotate(oldToken);\n      res.cookie(\"rt\", newRefresh, {\n        httpOnly: true,\n        sameSite: \"strict\",\n        maxAge: REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,\n      });\n      res.json({ accessToken: access });\n    } catch (err) {\n      if (err instanceof InvalidToken || err instanceof TokenReuseDetected) {\n        res.clearCookie(\"rt\");\n        res.status(401).json({ error: \"Unauthorized\" });\n        return;\n      }\n      throw err;\n    }\n  };",
+      "observation": "The refresh endpoint awaits tokenService.rotate (line 16), which is not atomic. Two concurrent refresh requests using the same oldToken will both pass line 52-55 checks before either calls revoke."
+    },
+    {
+      "id": "B6",
+      "kind": "config",
+      "file": "demo-app/api/src/config.ts",
+      "lines": "1-3",
+      "quote": "export const ACCESS_TOKEN_TTL = 15 * 60; // seconds\nexport const REFRESH_TOKEN_TTL_DAYS = 30;\nexport const JWT_SECRET = process.env.JWT_SECRET ?? \"dev-only-secret\";",
+      "observation": "ACCESS_TOKEN_TTL is 15 minutes. After page refresh with an expired access token, the client immediately calls /auth/refresh. If two such refresh calls arrive concurrently from the same session, the race condition is triggered."
+    },
+    {
+      "id": "B7",
+      "kind": "test",
+      "file": "demo-app/api/tests/auth.test.ts",
+      "lines": "110-130",
+      "quote": "describe(\"refresh rotation\", () => {\n  it(\"refresh rotates token and old token yields 401\", async () => {\n    const { app } = setup();\n    const loginRes = await request(app)\n      .post(\"/auth/login\")\n      .send({ email: \"alice@shoply.test\", password: \"demo1234\" });\n    const cookies = loginRes.headers[\"set-cookie\"] as string[];\n    const rtCookie = cookies.find((c: string) => c.startsWith(\"rt=\"));\n    expect(rtCookie).toBeDefined();\n\n    const refreshRes = await request(app)\n      .post(\"/auth/refresh\")\n      .set(\"Cookie\", rtCookie!);\n    expect(refreshRes.status).toBe(200);\n    expect(refreshRes.body).toHaveProperty(\"accessToken\");\n\n    const reuseRes = await request(app)\n      .post(\"/auth/refresh\")\n      .set(\"Cookie\", rtCookie!);\n    expect(reuseRes.status).toBe(401);\n  });\n})",
+      "observation": "This test serializes the refresh requests, so it does not catch the race condition. The test expects sequential execution where the second request is made after the first completes. Real users can trigger concurrent requests."
+    },
+    {
+      "id": "B8",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "14-20",
+      "quote": "const findByHash = (hash: string): RefreshTokenRow | undefined => {\n    return db\n      .prepare<[string], RefreshTokenRow>(\n        \"SELECT * FROM refresh_tokens WHERE token_hash = ?\"\n      )\n      .get(hash);\n  };",
+      "observation": "findByHash is called at the start of rotate (line 52 of tokenService.ts). In a race condition, both concurrent requests retrieve the same row with revoked_at=null. Both will proceed past line 56 check."
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "HB1",
+      "statement": "When two refresh requests arrive concurrently with the same refresh token: both call rotate() → both findByHash() reads the same row with revoked_at=null → both pass the checks → both call revoke() on the same id → one or both insert a new token. The race can cause the family revocation detection to fire on a subsequent request, logging the user out.",
+      "supporting_evidence": ["B1", "B5", "B8"],
+      "contradicting_evidence": [],
+      "confidence": 0.75
+    },
+    {
+      "id": "HB2",
+      "statement": "When two concurrent refresh requests use the same oldToken and both successfully complete, one may return its response later. A third concurrent browser request (e.g. Dashboard parallel calls) can use the already-rotated token, triggering revokeFamily() on the family, which revokes both newly issued access tokens and logs the user out.",
+      "supporting_evidence": ["B1", "B2", "B5", "B7"],
+      "contradicting_evidence": [],
+      "confidence": 0.85
+    },
+    {
+      "id": "HB3",
+      "statement": "The missing database transaction protection around the rotate() function is the root cause. The function should be atomic: find token, check state, revoke old, and insert new should all happen within a single database transaction. Without transactions, better-sqlite3's sequential queries are vulnerable to interleaving by concurrent requests at the await points (lines 61-62).",
+      "supporting_evidence": ["B1", "B2", "B3"],
+      "contradicting_evidence": [],
+      "confidence": 0.95
+    },
+    {
+      "id": "HB4",
+      "statement": "Users are randomly logged out specifically after coming back to the app after a while (access token expires) because the expired access token causes all three concurrent Dashboard calls to get 401, each firing refreshSession() independently with the same refresh token cookie, and the non-atomic rotate() cannot handle them.",
+      "supporting_evidence": ["B6", "B4", "B5"],
+      "contradicting_evidence": [],
+      "confidence": 0.9
+    }
+  ]
+}

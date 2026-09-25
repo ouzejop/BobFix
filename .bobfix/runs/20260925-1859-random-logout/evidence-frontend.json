@@ -1,0 +1,106 @@
+{
+  "agent": "frontend-investigator",
+  "scope": "frontend code only — demo-app/web/src/lib/apiClient.ts, demo-app/web/src/lib/session.ts, demo-app/web/src/pages/Dashboard.tsx, demo-app/web/src/pages/Login.tsx",
+  "files_examined": [
+    "demo-app/web/src/lib/apiClient.ts",
+    "demo-app/web/src/lib/session.ts",
+    "demo-app/web/src/pages/Dashboard.tsx",
+    "demo-app/web/src/pages/Login.tsx"
+  ],
+  "evidence": [
+    {
+      "id": "F1",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/session.ts",
+      "lines": "1-5",
+      "quote": "let _accessToken: string | null = null;\n\nexport function getAccessToken(): string | null {\n  return _accessToken;\n}",
+      "observation": "Access token is stored in a module-level variable that is never persisted to localStorage, sessionStorage, or cookies. It initializes to null on every page load."
+    },
+    {
+      "id": "F2",
+      "kind": "code",
+      "file": "demo-app/web/src/pages/Login.tsx",
+      "lines": "22-24",
+      "quote": "const data = (await res.json()) as { accessToken: string };\n    setAccessToken(data.accessToken);\n    window.location.href = \"/\";",
+      "observation": "After successful login, the access token is set in memory, then the page is redirected to '/'. Token exists only in memory."
+    },
+    {
+      "id": "F3",
+      "kind": "code",
+      "file": "demo-app/web/src/pages/Dashboard.tsx",
+      "lines": "29-39",
+      "quote": "useEffect(() => {\n    Promise.all([\n      api<Me>(\"/me\"),\n      api<Order[]>(\"/orders\"),\n      api<CartItem[]>(\"/cart\"),\n    ]).then(([meData, ordersData, cartData]) => {\n      setMe(meData);\n      setOrders(ordersData);\n      setCart(cartData);\n    });\n  }, []);",
+      "observation": "Dashboard makes three concurrent API calls on mount without any error handling. If any fail with 401, multiple refresh attempts will be triggered simultaneously."
+    },
+    {
+      "id": "F4",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/apiClient.ts",
+      "lines": "14-46",
+      "quote": "export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {\n  const token = getAccessToken();\n  const res = await fetch(path, {\n    ...options,\n    credentials: \"include\",\n    headers: {\n      ...options.headers,\n      ...(token ? { Authorization: `Bearer ${token}` } : {}),\n    },\n  });\n\n  if (res.status === 401) {\n    const refreshed = await refreshSession();\n    if (!refreshed) {\n      logout();\n      throw new Error(\"Session expired\");\n    }\n    const newToken = getAccessToken();\n    const retry = await fetch(path, {\n      ...options,\n      credentials: \"include\",\n      headers: {\n        ...options.headers,\n        ...(newToken ? { Authorization: `Bearer ${newToken}` } : {}),\n      },\n    });\n    if (!retry.ok) throw new Error(`Request failed: ${retry.status}`);\n    return retry.json() as Promise<T>;\n  }\n\n  if (!res.ok) throw new Error(`Request failed: ${res.status}`);\n  return res.json() as Promise<T>;\n}",
+      "observation": "api() function handles 401 by calling refreshSession(), but has no mutex/lock to prevent multiple simultaneous refresh attempts. Each 401 response independently triggers a refresh."
+    },
+    {
+      "id": "F5",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/apiClient.ts",
+      "lines": "3-12",
+      "quote": "async function refreshSession(): Promise<boolean> {\n  const res = await fetch(\"/auth/refresh\", {\n    method: \"POST\",\n    credentials: \"include\",\n  });\n  if (!res.ok) return false;\n  const data = (await res.json()) as { accessToken: string };\n  setAccessToken(data.accessToken);\n  return true;\n}",
+      "observation": "refreshSession() updates _accessToken module variable synchronously after fetch completes, but there is no coordination between concurrent refresh calls."
+    },
+    {
+      "id": "F6",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/session.ts",
+      "lines": "11-15",
+      "quote": "export function logout(): void {\n  _accessToken = null;\n  fetch(\"/auth/logout\", { method: \"POST\", credentials: \"include\" }).catch(() => {});\n  window.location.href = \"/login\";\n}",
+      "observation": "logout() sets _accessToken to null and navigates to /login, but does NOT wait for the logout request to complete. window.location.href assignment happens immediately."
+    },
+    {
+      "id": "F7",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/apiClient.ts",
+      "lines": "25-30",
+      "quote": "if (res.status === 401) {\n    const refreshed = await refreshSession();\n    if (!refreshed) {\n      logout();\n      throw new Error(\"Session expired\");\n    }",
+      "observation": "When refresh fails, logout() is called which immediately redirects to /login. Any other in-flight requests still waiting will not have their completion awaited."
+    },
+    {
+      "id": "F8",
+      "kind": "code",
+      "file": "demo-app/web/src/lib/apiClient.ts",
+      "lines": "31-41",
+      "quote": "    const newToken = getAccessToken();\n    const retry = await fetch(path, {\n      ...options,\n      credentials: \"include\",\n      headers: {\n        ...options.headers,\n        ...(newToken ? { Authorization: `Bearer ${newToken}` } : {}),\n      },\n    });\n    if (!retry.ok) throw new Error(`Request failed: ${retry.status}`);\n    return retry.json() as Promise<T>;",
+      "observation": "After refresh, the original request is retried. If refresh failed but returned true (race condition), newToken could be null or stale, causing the retry to also fail."
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "HF1",
+      "statement": "Access token is lost on page reload because it is stored only in memory (module variable _accessToken), not persisted to localStorage/sessionStorage. When user refreshes, _accessToken resets to null, causing all API requests to fail with 401 and immediately log them out.",
+      "supporting_evidence": ["F1", "F2"],
+      "contradicting_evidence": [],
+      "confidence": 0.95
+    },
+    {
+      "id": "HF2",
+      "statement": "When Dashboard mounts on page reload with no token in memory, three concurrent api() calls (F3) all receive 401 responses. Each independently calls refreshSession() without mutex synchronization, creating a race condition where multiple refresh requests are sent and one may succeed while others fail or receive conflicting responses.",
+      "supporting_evidence": ["F3", "F4", "F5"],
+      "contradicting_evidence": [],
+      "confidence": 0.85
+    },
+    {
+      "id": "HF3",
+      "statement": "When a refresh attempt fails, one concurrent request calls logout() (F6) which immediately navigates to /login (F7) without awaiting the logout fetch. Other in-flight api() calls are interrupted mid-execution, leaving the user in an inconsistent state without error visibility.",
+      "supporting_evidence": ["F6", "F7", "F4"],
+      "contradicting_evidence": [],
+      "confidence": 0.8
+    },
+    {
+      "id": "HF4",
+      "statement": "The retry after refresh (F8) may receive a null or stale token if multiple refreshSession() calls race each other. If one refresh succeeds but updates _accessToken after another has already read it as null, the retry will fail with the same 401, causing immediate logout.",
+      "supporting_evidence": ["F5", "F8"],
+      "contradicting_evidence": [],
+      "confidence": 0.75
+    }
+  ]
+}

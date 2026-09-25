@@ -1,0 +1,140 @@
+{
+  "agent": "data-investigator",
+  "scope": "schema, migrations and data-access code for refresh tokens and session persistence",
+  "files_examined": [
+    "demo-app/api/src/db/migrations/001_init.sql",
+    "demo-app/api/src/db/refreshTokenRepo.ts",
+    "demo-app/api/src/db/userRepo.ts",
+    "demo-app/api/src/db/connection.ts",
+    "demo-app/api/src/middleware/authMiddleware.ts",
+    "demo-app/api/src/services/tokenService.ts",
+    "demo-app/api/src/controllers/authController.ts",
+    "demo-app/api/src/controllers/refreshController.ts"
+  ],
+  "evidence": [
+    {
+      "id": "D1",
+      "kind": "schema",
+      "file": "demo-app/api/src/db/migrations/001_init.sql",
+      "lines": "8-23",
+      "quote": "CREATE TABLE IF NOT EXISTS token_families (\n  id TEXT PRIMARY KEY,\n  user_id INTEGER NOT NULL REFERENCES users(id),\n  created_at INTEGER NOT NULL,\n  revoked_at INTEGER NULL\n);\n\nCREATE TABLE IF NOT EXISTS refresh_tokens (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  family_id TEXT NOT NULL REFERENCES token_families(id),\n  user_id INTEGER NOT NULL REFERENCES users(id),\n  token_hash TEXT UNIQUE NOT NULL,\n  created_at INTEGER NOT NULL,\n  expires_at INTEGER NOT NULL,\n  revoked_at INTEGER NULL\n);",
+      "observation": "Foreign keys defined with REFERENCES but no ON DELETE CASCADE; token revocation is soft (timestamp) not hard delete"
+    },
+    {
+      "id": "D2",
+      "kind": "code",
+      "file": "demo-app/api/src/db/connection.ts",
+      "lines": "8-18",
+      "quote": "export function openDb(path: string): Database.Database {\n  const db = new Database(path);\n  db.pragma(\"journal_mode = WAL\");\n  db.pragma(\"foreign_keys = ON\");\n  const migration = readFileSync(\n    join(__dirname, \"migrations\", \"001_init.sql\"),\n    \"utf8\"\n  );\n  db.exec(migration);\n  return db;\n}",
+      "observation": "Database enabled foreign_keys pragma and WAL mode for concurrency; db.exec() runs migration as single batch but individual mutations are not transactional"
+    },
+    {
+      "id": "D3",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "39-46",
+      "quote": "const revokeFamily = (familyId: string): void => {\n  db.prepare(\n    \"UPDATE token_families SET revoked_at = ? WHERE id = ?\"\n  ).run(Date.now(), familyId);\n  db.prepare(\n    \"UPDATE refresh_tokens SET revoked_at = ? WHERE family_id = ? AND revoked_at IS NULL\"\n  ).run(Date.now(), familyId);\n};",
+      "observation": "Two separate UPDATE statements without transaction wrapping; if first succeeds and second fails, token_families is marked revoked but refresh_tokens remains unrevoked; no atomicity guarantee"
+    },
+    {
+      "id": "D4",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "48-55",
+      "quote": "const isFamilyRevoked = (familyId: string): boolean => {\n  const row = db\n    .prepare<[string], { revoked_at: number | null }>(\n      \"SELECT revoked_at FROM token_families WHERE id = ?\"\n    )\n    .get(familyId);\n  return row == null || row.revoked_at != null;\n};",
+      "observation": "Returns true if family_id row not found (row == null) OR if revoked_at is set; treats missing row same as revoked row; concurrent deletes could cause false positives"
+    },
+    {
+      "id": "D5",
+      "kind": "code",
+      "file": "demo-app/api/src/middleware/authMiddleware.ts",
+      "lines": "16-22",
+      "quote": "try {\n  const payload = await verifyAccessToken(token);\n  const fid = payload[\"fid\"] as string | undefined;\n  if (!fid || repo.isFamilyRevoked(fid)) {\n    res.status(401).json({ error: \"Unauthorized\" });\n    return;\n  }\n  (req as Request & { userId: number }).userId = Number(payload.sub);\n  next();",
+      "observation": "After JWT cryptographic verification succeeds, checks if family_id is revoked via DB query; JWT signature is valid but family check is secondary and has DB-level race condition"
+    },
+    {
+      "id": "D6",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "51-71",
+      "quote": "const rotate = async (oldToken: string) => {\n  const row = repo.findByHash(sha256(oldToken));\n  if (!row || row.expires_at < Date.now() || repo.isFamilyRevoked(row.family_id)) {\n    throw new InvalidToken();\n  }\n  if (row.revoked_at) {\n    repo.revokeFamily(row.family_id);\n    throw new TokenReuseDetected();\n  }\n  repo.revoke(row.id);\n  const user = await users.findById(row.user_id);\n  const access = await signAccessToken(user, row.family_id);\n  const refresh = newRefreshToken();\n  repo.insert({\n    familyId: row.family_id,\n    userId: user.id,\n    hash: sha256(refresh),\n    expiresAt: Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,\n  });\n  return { access, refresh };\n};",
+      "observation": "Line 53 checks `repo.isFamilyRevoked()` after findByHash; line 60 revokes single token; between these lines other threads could mutate family revocation state; rotation logic is not atomic"
+    },
+    {
+      "id": "D7",
+      "kind": "code",
+      "file": "demo-app/api/src/controllers/authController.ts",
+      "lines": "28-31",
+      "quote": "const logout = (_req: Request, res: Response): void => {\n  res.clearCookie(\"rt\");\n  res.status(204).end();\n};",
+      "observation": "Logout only clears client cookie; does NOT revoke tokens in database; family_revoked_at and refresh_tokens.revoked_at remain unchanged; logout is not persisted"
+    },
+    {
+      "id": "D8",
+      "kind": "code",
+      "file": "demo-app/api/src/controllers/refreshController.ts",
+      "lines": "9-31",
+      "quote": "const refresh = async (req: Request, res: Response): Promise<void> => {\n  const oldToken = (req.cookies as Record<string, string>)[\"rt\"];\n  if (!oldToken) {\n    res.status(401).json({ error: \"No refresh token\" });\n    return;\n  }\n  try {\n    const { access, refresh: newRefresh } = await tokenService.rotate(oldToken);\n    res.cookie(\"rt\", newRefresh, {\n      httpOnly: true,\n      sameSite: \"strict\",\n      maxAge: REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,\n    });\n    res.json({ accessToken: access }); \n  } catch (err) {\n    if (err instanceof InvalidToken || err instanceof TokenReuseDetected) {\n      res.clearCookie(\"rt\");\n      res.status(401).json({ error: \"Unauthorized\" });\n        return;\n    }\n    throw err;\n  }\n};",
+      "observation": "Line 16 calls rotate() which performs 3 DB operations: findByHash, isFamilyRevoked, revoke(); no transaction wrapping; if refresh token expires between line 52 check and line 60 revoke in tokenService, inconsistent state possible"
+    },
+    {
+      "id": "D9",
+      "kind": "schema",
+      "file": "demo-app/api/src/db/migrations/001_init.sql",
+      "lines": "17",
+      "quote": "family_id TEXT NOT NULL REFERENCES token_families(id),",
+      "observation": "Foreign key constraint exists but migration does not specify ON DELETE behavior; SQLite default is RESTRICT (prevents deletion if children exist) not CASCADE"
+    },
+    {
+      "id": "D10",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "30-35",
+      "quote": "export async function signAccessToken(user: UserRow, familyId: string): Promise<string> {\n  return new SignJWT({ sub: String(user.id), fid: familyId })\n    .setProtectedHeader({ alg: \"HS256\" })\n    .setExpirationTime(Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL)\n    .sign(secretBytes);\n}",
+      "observation": "ACCESS_TOKEN_TTL is 900 seconds (15 minutes); JWT expiration is checked by JWT library in middleware, not by DB query; family revocation is checked separately after JWT verification"
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "HD1",
+      "statement": "Users are randomly logged out because the revokeFamily() function is not atomic: the token_families table is updated to mark family revoked, but then the refresh_tokens update can race with concurrent requests that check isFamilyRevoked(), causing those requests to see revoked family before their own revoke completes.",
+      "supporting_evidence": ["D3", "D4", "D5"],
+      "contradicting_evidence": [],
+      "confidence": 0.85
+    },
+    {
+      "id": "HD2",
+      "statement": "The isFamilyRevoked() function returns true for non-existent family_ids (D4 line 54: `row == null`), which can cause false-positive logouts if token_families records are garbage collected or if there is concurrent deletion, causing valid access tokens to be rejected.",
+      "supporting_evidence": ["D4", "D5"],
+      "contradicting_evidence": ["D1"],
+      "confidence": 0.65
+    },
+    {
+      "id": "HD3",
+      "statement": "The logout endpoint (authController.ts) does not persist revocation to the database, only clearing the client cookie. If a user logs out and another tab/device still has the refresh token, it can continue making valid refresh requests, bypassing logout intent.",
+      "supporting_evidence": ["D7"],
+      "contradicting_evidence": [],
+      "confidence": 0.95
+    },
+    {
+      "id": "HD4",
+      "statement": "The tokenService.rotate() function performs multiple sequential DB queries (findByHash, isFamilyRevoked, revoke, insert) without transaction wrapping. Between the isFamilyRevoked check and the revoke operation, another request could revoke the family, causing the rotation to insert a new token into a revoked family.",
+      "supporting_evidence": ["D6", "D8"],
+      "contradicting_evidence": [],
+      "confidence": 0.75
+    },
+    {
+      "id": "HD5",
+      "statement": "When access tokens expire after 15 minutes of inactivity and the user refreshes the page, the middleware checks both JWT validity and family revocation status. If the family revocation check races with a concurrent revokeFamily() call from another device/session, the request can be rejected even though the token was valid milliseconds before.",
+      "supporting_evidence": ["D3", "D5", "D10"],
+      "contradicting_evidence": [],
+      "confidence": 0.8
+    },
+    {
+      "id": "HD6",
+      "statement": "The schema defines foreign key constraints but does not specify ON DELETE CASCADE, so if token_families rows are ever deleted, refresh_tokens would be orphaned.",
+      "supporting_evidence": ["D1", "D9"],
+      "contradicting_evidence": [],
+      "confidence": 0.5
+    }
+  ]
+}

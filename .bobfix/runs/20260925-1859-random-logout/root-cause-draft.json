@@ -1,0 +1,120 @@
+{
+  "run_id": "20260925-1859-random-logout",
+  "root_cause": {
+    "title": "Three concurrent refresh calls on Dashboard load race inside the non-atomic rotate() and trigger token-reuse detection, logging the user out",
+    "explanation": "When a user returns to the app after the 15-minute access-token TTL has elapsed, Dashboard.tsx fires three API calls in parallel via Promise.all (F3). All three receive a 401 because the access token is held only in memory and is null after a page reload (F1). Each call independently invokes refreshSession() with no mutex (F4, F5), sending up to three concurrent POST /auth/refresh requests carrying the same refresh-token cookie. On the backend, rotate() reads the token row, checks its state, revokes it, and inserts a replacement — but these four steps are not wrapped in a transaction (B1, D6). When two requests execute rotate() concurrently: Request A reads the row (revoked_at=null), Request B reads the same row (revoked_at=null), Request A calls repo.revoke() (sets revoked_at), then continues with two async awaits. Request B now calls repo.revoke() on the already-revoked row, then at some point a third request or Request B's own second attempt calls rotate() and finds row.revoked_at set — which triggers repo.revokeFamily() (B1 line 56-58, D3). The family is now globally revoked; every subsequent access-token check against that family by authMiddleware returns 401 (B4, D5). The first refreshSession() call to fail returns false, the client calls logout(), and the user is redirected to /login with no error message (F6, F7).",
+    "confidence": 0.92,
+    "causal_chain": [
+      {
+        "step": 1,
+        "layer": "frontend",
+        "evidence": ["F1", "F2"],
+        "what": "_accessToken is a module-level variable that resets to null on every page load; after reload the token is gone even though a valid refresh token cookie still exists"
+      },
+      {
+        "step": 2,
+        "layer": "frontend",
+        "evidence": ["F3", "F4", "F5"],
+        "what": "Dashboard.tsx fires three concurrent api() calls; all three receive 401; each independently calls refreshSession() with no mutex, sending three POST /auth/refresh requests with the same cookie"
+      },
+      {
+        "step": 3,
+        "layer": "backend",
+        "evidence": ["B1", "B5", "B8"],
+        "what": "rotate() in tokenService.ts reads the token row, checks revocation, and then revokes in separate synchronous steps with two async awaits in between (users.findById, signAccessToken); two concurrent calls both read revoked_at=null before either revokes"
+      },
+      {
+        "step": 4,
+        "layer": "data",
+        "evidence": ["D6", "D3"],
+        "what": "repo.revoke() marks the same token row twice; when a subsequent rotate() call (or the second concurrent call) then reads that row, it finds row.revoked_at set and calls repo.revokeFamily() — two separate UPDATE statements, not in a transaction — marking the entire family revoked"
+      },
+      {
+        "step": 5,
+        "layer": "backend",
+        "evidence": ["B4", "D5"],
+        "what": "authMiddleware checks isFamilyRevoked() after verifying the JWT; the family is now revoked, so every request with that family's access token gets 401 regardless of JWT validity"
+      },
+      {
+        "step": 6,
+        "layer": "frontend",
+        "evidence": ["F7", "F6"],
+        "what": "The first refreshSession() that returns false triggers logout() which sets _accessToken=null and immediately redirects to /login with no error message — matching the bug report exactly"
+      }
+    ],
+    "affected_files": [
+      "demo-app/web/src/lib/apiClient.ts",
+      "demo-app/api/src/services/tokenService.ts",
+      "demo-app/api/src/db/refreshTokenRepo.ts"
+    ]
+  },
+  "hypotheses": [
+    {
+      "id": "HF1",
+      "statement": "Access token stored only in memory (_accessToken) resets to null on every page reload",
+      "status": "supported",
+      "evidence": ["F1", "F2"]
+    },
+    {
+      "id": "HF2",
+      "statement": "Three concurrent api() calls each independently call refreshSession() when they all receive 401",
+      "status": "supported",
+      "evidence": ["F3", "F4", "F5"]
+    },
+    {
+      "id": "HB3",
+      "statement": "rotate() is not wrapped in a transaction, making it non-atomic under concurrent calls",
+      "status": "supported",
+      "evidence": ["B1", "B2", "D6"]
+    },
+    {
+      "id": "HB2",
+      "statement": "The second concurrent rotate() call finds row.revoked_at already set (written by the first call), triggers revokeFamily(), which invalidates the entire token family and all issued access tokens",
+      "status": "supported",
+      "evidence": ["B1", "B8", "D3", "B5"]
+    },
+    {
+      "id": "HF3",
+      "statement": "The first failed refresh triggers logout() which redirects immediately with no error, causing a silent logout",
+      "status": "supported",
+      "evidence": ["F6", "F7"]
+    },
+    {
+      "id": "HD2",
+      "statement": "isFamilyRevoked() returning true for missing rows causes false-positive logouts via garbage-collected records",
+      "status": "rejected",
+      "evidence": ["D4", "D1"],
+      "reason": "The schema uses soft-delete timestamps (D1); there are no hard deletes anywhere in the codebase; family rows are never removed, so row == null cannot be true for a live session"
+    },
+    {
+      "id": "HD6",
+      "statement": "Missing ON DELETE CASCADE causes orphaned refresh_tokens rows when a family is deleted",
+      "status": "rejected",
+      "evidence": ["D1", "D9"],
+      "reason": "Token families are never hard-deleted; only soft-revoked via revoked_at timestamp (D1, D3). Cascade behavior is irrelevant to the observed bug."
+    },
+    {
+      "id": "HD3",
+      "statement": "Logout does not persist revocation to the database, allowing reuse of refresh tokens after logout from another tab",
+      "status": "inconclusive",
+      "evidence": ["D7"],
+      "reason": "Real security issue but unrelated to the reported symptom of users being logged out unexpectedly; logout is client-initiated here, not a cause of unwanted logouts"
+    }
+  ],
+  "fix_direction": {
+    "summary": "Two independent fixes are required, one on each side of the call. (1) Frontend — apiClient.ts must deduplicate concurrent refresh calls: a single in-flight refresh Promise should be shared across all concurrent api() callers; once it resolves, all waiting callers use the resulting token rather than each sending their own refresh request. (2) Backend — tokenService.rotate() must be wrapped in a better-sqlite3 transaction so that findByHash, isFamilyRevoked check, revoke, and insert are executed atomically. The awaits inside rotate (users.findById, signAccessToken) should be moved outside the transaction boundary so the DB is not held open during async I/O. The fix to the frontend is the higher-priority one: it prevents more than one refresh request from ever being sent, eliminating the race entirely. The backend transaction is a defence-in-depth measure that also closes the window for concurrent requests from multiple browser tabs.",
+    "files": [
+      "demo-app/web/src/lib/apiClient.ts",
+      "demo-app/api/src/services/tokenService.ts"
+    ],
+    "regression_test_idea": "Simulate the exact scenario: call /auth/refresh three times concurrently using the same refresh-token cookie (same as Dashboard.tsx does on reload). All three should succeed (returning 200 with a new accessToken) or at most one should succeed and the others should receive 401; critically, none should cause the returned access token to be permanently invalidated by revokeFamily. On the current code, one of the three will trigger revokeFamily and any subsequent use of the new access token will be rejected with 401. The test should assert that after N concurrent refresh calls, the latest returned access token can still successfully call a protected endpoint (e.g. GET /me)."
+  },
+  "skeptic": null,
+  "stats": {
+    "files_examined": 14,
+    "evidence_count": 26,
+    "subagents": 3,
+    "started_at": "2026-09-25T18:59:13Z",
+    "finished_at": "2026-09-25T19:05:30Z"
+  }
+}

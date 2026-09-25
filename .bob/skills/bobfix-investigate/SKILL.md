@@ -48,13 +48,19 @@ the evidence files. Its job is to break the draft, not to agree with it.
 Save its JSON verbatim as `challenges-round-<n>.json`.
 </Step>
 <Step>
-Answer every challenge in `challenges-round-<n>.json`, in `rebuttals-round-<n>.json`:
-either `refuted` (quote the code that proves the challenge wrong) or `accepted`
-(then revise the draft: explanation, causal chain, fix direction or regression
-test idea). You may read code yourself to answer. A challenge without a quoted
-refutation is accepted.
-If any challenge was accepted, run the skeptic again on the revised draft
-(round n+1). Stop when a round has no accepted challenge, or after 3 rounds.
+Answer every challenge in `challenges-round-<n>.json`, in `rebuttals-round-<n>.json`.
+For each one, FIRST open the quoted lines yourself and check the quote says what
+the skeptic claims. Then mark it:
+- `refuted` — the quote is wrong, or other code (quote it) proves the claim false;
+- `accepted` — the code confirms it; revise the draft accordingly.
+Skeptics can be wrong too: never accept a challenge you have not checked in the code.
+</Step>
+<Step>
+Loop — MANDATORY. If round <n> had at least one accepted challenge, you MUST spawn
+the skeptic again on the revised draft (round n+1), passing the previous
+challenges so it does not repeat them. Only stop when a round has zero accepted
+challenges, or after round 3. State in the summary how many rounds ran and why
+it stopped.
 </Step>
 <Step>
 Finalise `root-cause.json`. Add a `skeptic` section: rounds run, challenges

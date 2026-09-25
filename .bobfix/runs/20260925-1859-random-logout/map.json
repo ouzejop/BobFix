@@ -1,0 +1,41 @@
+{
+  "run_id": "20260925-1859-random-logout",
+  "layers": {
+    "frontend": {
+      "root": "demo-app/web/src",
+      "entry_points": [
+        "demo-app/web/src/lib/apiClient.ts",
+        "demo-app/web/src/lib/session.ts",
+        "demo-app/web/src/pages/Dashboard.tsx",
+        "demo-app/web/src/pages/Login.tsx"
+      ]
+    },
+    "backend": {
+      "root": "demo-app/api/src",
+      "entry_points": [
+        "demo-app/api/src/controllers/authController.ts",
+        "demo-app/api/src/controllers/refreshController.ts",
+        "demo-app/api/src/middleware/authMiddleware.ts",
+        "demo-app/api/src/services/tokenService.ts",
+        "demo-app/api/src/app.ts",
+        "demo-app/api/src/config.ts"
+      ]
+    },
+    "data": {
+      "root": "demo-app/api/src/db",
+      "entry_points": [
+        "demo-app/api/src/db/migrations/001_init.sql",
+        "demo-app/api/src/db/refreshTokenRepo.ts",
+        "demo-app/api/src/db/userRepo.ts",
+        "demo-app/api/src/db/connection.ts"
+      ]
+    },
+    "tests": {
+      "root": "demo-app/api/tests",
+      "files": [
+        "demo-app/api/tests/auth.test.ts",
+        "demo-app/api/tests/token-expiry.test.ts"
+      ]
+    }
+  }
+}

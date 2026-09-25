@@ -1,0 +1,135 @@
+{
+  "run_id": "20260925-1859-random-logout",
+  "root_cause": {
+    "title": "Concurrent api() calls each independently fire refreshSession(); the second call's fetch carries the already-rotated (stale) refresh-token cookie, which triggers token-reuse detection and revokeFamily(), silently logging the user out",
+    "explanation": "When a user returns to the app with an expired access token, Dashboard.tsx fires three api() calls concurrently via Promise.all. All three receive 401 because the access token is held only in a module-level variable that resets to null on page reload. Each of the three api() calls independently calls refreshSession() with no mutex. The first refreshSession() fetch completes, rotates the old refresh token (setting its revoked_at in the DB) and the browser receives a new rt cookie. However, the second api() call's refreshSession() fetch was already in-flight with the OLD rt cookie captured before the first response arrived. When this second fetch reaches the backend, rotate() reads the old token row which now has revoked_at set (written by the first call). This triggers the token-reuse-detection branch: revokeFamily() is called, the entire token family is permanently revoked, and the backend returns 401. refreshSession() returns false; the client calls logout() which immediately redirects to /login with no error message. This matches the reported symptom exactly: users are silently redirected to the login page after a period of inactivity.",
+    "confidence": 0.93,
+    "causal_chain": [
+      {
+        "step": 1,
+        "layer": "frontend",
+        "evidence": ["F1", "F2"],
+        "what": "_accessToken is a module-level variable; it resets to null on every page reload. Even though a valid refresh-token cookie still exists, the access token is gone and every API call will receive 401."
+      },
+      {
+        "step": 2,
+        "layer": "frontend",
+        "evidence": ["F3", "F4", "F5"],
+        "what": "Dashboard.tsx fires three concurrent api() calls via Promise.all. All three receive 401 (no access token). Each independently calls refreshSession() with no mutex — up to three fetch('/auth/refresh') requests go out carrying the same rt cookie."
+      },
+      {
+        "step": 3,
+        "layer": "backend",
+        "evidence": ["B5", "B1"],
+        "what": "The first refresh request reaches rotate(): findByHash reads the old token row (revoked_at=null), revocation check passes, repo.revoke() sets revoked_at on the old token. A new token pair is inserted and the response is sent. The browser's rt cookie is updated to the new refresh token."
+      },
+      {
+        "step": 4,
+        "layer": "data",
+        "evidence": ["B8", "D6", "B2"],
+        "what": "The second refreshSession() fetch was already in-flight carrying the OLD rt cookie value (fetched was initiated before the first response arrived). When it reaches the backend, rotate() calls findByHash on the old token hash — which now has revoked_at set (written in step 3)."
+      },
+      {
+        "step": 5,
+        "layer": "backend",
+        "evidence": ["B1"],
+        "what": "In rotate(), line 56: `if (row.revoked_at)` is now true. revokeFamily() is called: both token_families.revoked_at and all refresh_tokens.revoked_at for this family are set. TokenReuseDetected is thrown. refreshController catches it, clears the rt cookie and returns 401."
+      },
+      {
+        "step": 6,
+        "layer": "data",
+        "evidence": ["D3", "D5"],
+        "what": "The family is now globally revoked. authMiddleware's isFamilyRevoked() check returns true for any access token with this family_id. Every subsequent authenticated request returns 401."
+      },
+      {
+        "step": 7,
+        "layer": "frontend",
+        "evidence": ["F5", "F7", "F6"],
+        "what": "refreshSession() receives a non-200 response and returns false. api() calls logout(), which sets _accessToken=null and immediately redirects to /login with no error message shown to the user."
+      }
+    ],
+    "affected_files": [
+      "demo-app/web/src/lib/apiClient.ts",
+      "demo-app/api/src/services/tokenService.ts",
+      "demo-app/api/src/db/refreshTokenRepo.ts"
+    ]
+  },
+  "hypotheses": [
+    {
+      "id": "HF1",
+      "statement": "Access token stored only in memory (_accessToken) resets to null on every page reload, causing all API calls to 401 on return after inactivity",
+      "status": "supported",
+      "evidence": ["F1", "F2"]
+    },
+    {
+      "id": "HF2",
+      "statement": "Three concurrent api() calls each independently call refreshSession() when they all receive 401, sending multiple refresh requests with the same cookie",
+      "status": "supported",
+      "evidence": ["F3", "F4", "F5"]
+    },
+    {
+      "id": "HB2",
+      "statement": "The second concurrent refreshSession() fetch carries the stale (already-rotated) rt cookie; rotate() finds row.revoked_at set, fires revokeFamily(), returns 401, and the client calls logout()",
+      "status": "supported",
+      "evidence": ["B1", "B8", "D3", "F5", "F7"]
+    },
+    {
+      "id": "HB3",
+      "statement": "rotate() is not wrapped in a transaction, making it non-atomic — a necessary condition for the stale-cookie race to produce inconsistent state",
+      "status": "supported",
+      "evidence": ["B1", "B2", "D6"]
+    },
+    {
+      "id": "HF3",
+      "statement": "The first failed refresh triggers logout() which redirects immediately with no error, causing a silent logout",
+      "status": "supported",
+      "evidence": ["F6", "F7"]
+    },
+    {
+      "id": "HD2",
+      "statement": "isFamilyRevoked() returning true for missing rows causes false-positive logouts via garbage-collected records",
+      "status": "rejected",
+      "evidence": ["D4", "D1"],
+      "reason": "The schema uses soft-delete timestamps only (D1); there are no hard deletes anywhere in the codebase; family rows are never removed, so `row == null` cannot be true for a live session"
+    },
+    {
+      "id": "HD6",
+      "statement": "Missing ON DELETE CASCADE causes orphaned refresh_tokens rows when a family is deleted",
+      "status": "rejected",
+      "evidence": ["D1", "D9"],
+      "reason": "Token families are never hard-deleted; only soft-revoked via revoked_at timestamp. Cascade behavior is irrelevant to the observed bug."
+    },
+    {
+      "id": "HD3",
+      "statement": "Logout does not persist revocation to the database, allowing reuse of refresh tokens after logout from another tab",
+      "status": "inconclusive",
+      "evidence": ["D7"],
+      "reason": "Real security issue but unrelated to the reported symptom of users being logged out unexpectedly; logout is client-initiated here, not a cause of unwanted logouts"
+    }
+  ],
+  "fix_direction": {
+    "summary": "Primary fix is in the frontend: apiClient.ts must deduplicate concurrent refresh calls by sharing a single in-flight refresh Promise across all concurrent api() callers (a promise-based mutex). Once the shared refresh resolves, all waiting callers read the updated access token and retry their original request — only one POST /auth/refresh is ever sent per refresh cycle, eliminating the stale-cookie race entirely. Secondary fix (defence-in-depth, covers multi-tab/multi-device scenarios): tokenService.rotate() should wrap the read-check-revoke-insert sequence in a better-sqlite3 synchronous transaction. The two async awaits (users.findById and signAccessToken) must be pulled outside the transaction so the DB write lock is not held during crypto I/O; only the synchronous DB operations need to be atomic.",
+    "files": [
+      "demo-app/web/src/lib/apiClient.ts",
+      "demo-app/api/src/services/tokenService.ts"
+    ],
+    "regression_test_idea": "Test the frontend layer: simulate three concurrent api() calls (e.g. /me, /orders, /cart) against a test server where the initial access token is absent/expired. Spy on the number of POST /auth/refresh requests made. Assert: (a) exactly ONE refresh request is sent; (b) all three api() calls complete successfully (no error thrown); (c) logout() is never called. On the current code this test fails because three refresh requests are sent, the second one triggers revokeFamily, and logout() is called."
+  },
+  "skeptic": {
+    "rounds": 1,
+    "challenges": 5,
+    "accepted": 3,
+    "refuted": 2,
+    "changes": [
+      "Causal chain revised: the revokeFamily() trigger is NOT from three truly-concurrent reads before any revoke. It is from a second api() call (in the same Promise.all batch) whose refreshSession() fetch was already in-flight carrying the OLD rt cookie when the first rotation completed. The second fetch finds the old token's revoked_at already set and fires revokeFamily().",
+      "Regression test idea revised: test should simulate three concurrent frontend api() calls with an absent access token, assert exactly one refresh request is sent and no logout fires — testing the user-visible symptom, not an internal DB invariant."
+    ]
+  },
+  "stats": {
+    "files_examined": 14,
+    "evidence_count": 26,
+    "subagents": 4,
+    "started_at": "2026-09-25T18:59:13Z",
+    "finished_at": "2026-09-25T19:12:00Z"
+  }
+}

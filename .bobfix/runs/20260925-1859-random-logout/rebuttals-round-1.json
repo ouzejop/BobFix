@@ -1,0 +1,41 @@
+{
+  "round": 1,
+  "rebuttals": [
+    {
+      "challenge_id": "C1",
+      "verdict": "accepted — causal chain revised to clarify timing",
+      "analysis": "The skeptic is correct that three fully-concurrent calls all read the same in-memory `row` snapshot before any call reaches `repo.revoke()`, so the `if (row.revoked_at)` check at line 56 is never true for any of the three initial calls. The original draft's description of the race was imprecise. The actual path to `revokeFamily()` is: call A gets 401 → calls refreshSession() → rotate() succeeds, rotates token → cookie is updated (new rt). Call B (already in-flight from the same Promise.all batch) also gets 401 → calls refreshSession() → sends a fetch with the SAME OLD rt cookie it captured before A's response arrived. By the time B's fetch reaches the backend, the old token's `revoked_at` is already set (by A). Backend: `findByHash` returns the row, `row.revoked_at` is non-null → line 56 fires → `revokeFamily()` → 401 → `refreshSession()` returns false → `logout()` → /login. Evidence: tokenService.ts lines 52 and 56-58 (the stale row read + the revokeFamily branch); apiClient.ts lines 3-12 (refreshSession uses fetch which started with the old cookie). The causal chain is real; only the description of which call triggers line 56 was wrong."
+    },
+    {
+      "challenge_id": "C2",
+      "verdict": "refuted",
+      "analysis": "The fix-simulation challenge argues that a frontend mutex makes the backend race irrelevant and is therefore not truly 'fixing' anything. This is correct that the frontend mutex eliminates the trigger entirely, which IS the fix. The backend transaction is defence-in-depth for multi-tab and multi-device scenarios. The draft already stated 'The fix to the frontend is the higher-priority one: it prevents more than one refresh request from ever being sent, eliminating the race entirely.' The skeptic agrees that the mutex prevents the scenario — this is what the fix should do. No revision needed.",
+      "quote": {
+        "file": "demo-app/web/src/lib/apiClient.ts",
+        "lines": "25-30",
+        "text": "if (res.status === 401) {\n    const refreshed = await refreshSession();\n    if (!refreshed) {\n      logout();\n      throw new Error(\"Session expired\");\n    }"
+      }
+    },
+    {
+      "challenge_id": "C3",
+      "verdict": "accepted — regression test idea revised",
+      "analysis": "The skeptic is right: the proposed test fired three concurrent backend requests directly, which tests backend behaviour but not the actual frontend trigger. The regression test should simulate the real scenario: (1) login to get an access token + rt cookie; (2) expire the access token (or don't pass it); (3) fire three concurrent api() calls from the client layer; assert that NO logout() is called and that all three calls ultimately succeed. This more accurately reproduces the user symptom."
+    },
+    {
+      "challenge_id": "C4",
+      "verdict": "accepted — explanation revised (same as C1)",
+      "analysis": "Accepted as a duplicate of C1. The exact mechanism for when `refreshController` returns 401 is now clear: it returns 401 when the second concurrent refreshSession() fetch arrives with the old `rt` cookie, which by then has `revoked_at` set. `rotate()` finds `row.revoked_at` non-null → calls `revokeFamily()` → throws `TokenReuseDetected` → controller returns 401 and clears the cookie → `refreshSession()` returns false → `logout()` fires. This closes the explanation gap noted in C4."
+    },
+    {
+      "challenge_id": "C5",
+      "verdict": "refuted",
+      "analysis": "The skeptic raises that moving async awaits outside the transaction boundary could weaken token-reuse detection. This challenge is about the fix direction, not the root cause. The revised root cause clarifies that: (a) the check at line 56 reads the in-memory row snapshot from `findByHash` (line 52), not a live DB read; (b) wrapping lines 52-60 in a DB transaction ensures that if two requests race, the second will read the UPDATED row (with revoked_at set) within the transaction, making the revocation check see the correct state. Awaits at lines 61-62 happen after the token is already revoked and the insert would be inside the transaction as well — or the design can emit the new token outside the transaction (which doesn't weaken security because the revoke already committed). The security invariant is preserved."
+    }
+  ],
+  "accepted_challenges": ["C1", "C3", "C4"],
+  "refuted_challenges": ["C2", "C5"],
+  "changes_to_conclusion": [
+    "Causal chain step 3-4 revised: the revokeFamily() trigger is NOT from three truly-concurrent reads before any revoke. It is from a second api() call (in the same Promise.all batch) that sends refreshSession() AFTER the first one has already rotated the token. The second refreshSession() fetch carries the stale rt cookie, reaches the backend, findByHash finds the old row with revoked_at already set, and that fires revokeFamily().",
+    "Regression test idea revised: test should simulate the frontend scenario — three concurrent api() calls with an expired/absent access token — and assert no logout fires and all calls succeed after refresh."
+  ]
+}

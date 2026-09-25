@@ -1,0 +1,86 @@
+{
+  "round": 1,
+  "verdict": "broken",
+  "challenges": [
+    {
+      "id": "C1",
+      "axis": "causal-chain",
+      "claim": "Steps 3-4 describe concurrent calls reaching repo.revoke() but don't explain which call later finds row.revoked_at=true to trigger revokeFamily(). With three concurrent rotate() calls and no retry, all three should pass the line 56 revocation check before any reaches line 60 to set revoked_at.",
+      "evidence": [
+        {
+          "file": "demo-app/api/src/services/tokenService.ts",
+          "lines": "51-71",
+          "quote": "const rotate = async (oldToken: string) => {\n    const row = repo.findByHash(sha256(oldToken));\n    if (!row || row.expires_at < Date.now() || repo.isFamilyRevoked(row.family_id)) {\n      throw new InvalidToken();\n    }\n    if (row.revoked_at) {\n      repo.revokeFamily(row.family_id);\n      throw new TokenReuseDetected();\n    }\n    repo.revoke(row.id);"
+        },
+        {
+          "file": "demo-app/web/src/lib/apiClient.ts",
+          "lines": "3-12",
+          "quote": "async function refreshSession(): Promise<boolean> {\n  const res = await fetch(\"/auth/refresh\", {\n    method: \"POST\",\n    credentials: \"include\",\n  });\n  if (!res.ok) return false;\n  const data = (await res.json()) as { accessToken: string };\n  setAccessToken(data.accessToken);\n  return true;\n}"
+        }
+      ],
+      "severity": "blocking"
+    },
+    {
+      "id": "C2",
+      "axis": "fix-simulation",
+      "claim": "The draft proposes frontend mutex to deduplicate concurrent refreshSession() calls, reducing three concurrent rotate() calls to one. But the causal chain assumes concurrent database races at line 56-60. With one refresh, there is no concurrent race to simulate—the fix prevents the scenario entirely rather than fixing it.",
+      "evidence": [
+        {
+          "file": "demo-app/web/src/pages/Dashboard.tsx",
+          "lines": "30-38",
+          "quote": "Promise.all([\n      api<Me>(\"/me\"),\n      api<Order[]>(\"/orders\"),\n      api<CartItem[]>(\"/cart\"),\n    ]).then(([meData, ordersData, cartData]) => {"
+        },
+        {
+          "file": "demo-app/web/src/lib/apiClient.ts",
+          "lines": "25-26",
+          "quote": "if (res.status === 401) {\n    const refreshed = await refreshSession();"
+        }
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "C3",
+      "axis": "regression-test",
+      "claim": "The proposed test fires three concurrent POST /auth/refresh requests directly at the backend and expects them to fail on current code. But this tests backend isolation, not frontend deduplication. The test should verify that three concurrent frontend api() calls don't cause logout, not that backend refreshes are isolated.",
+      "evidence": [
+        {
+          "file": "demo-app/api/tests/auth.test.ts",
+          "lines": "1-46",
+          "quote": "No concurrent refresh test exists. Test lines 138-163 test sequential refresh and reuse, not concurrent calls."
+        }
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "C4",
+      "axis": "causal-chain",
+      "claim": "The draft states logout is triggered when 'the first refreshSession() call to fail returns false' but doesn't show which concurrent refresh call would fail and why. apiClient.refreshSession() only returns false if the backend returns non-200. When does refreshController return non-200 for concurrent calls that haven't reused a token yet?",
+      "evidence": [
+        {
+          "file": "demo-app/api/src/controllers/refreshController.ts",
+          "lines": "23-27",
+          "quote": "catch (err) {\n      if (err instanceof InvalidToken || err instanceof TokenReuseDetected) {\n        res.clearCookie(\"rt\");\n        res.status(401).json({ error: \"Unauthorized\" });\n        return;\n      }"
+        },
+        {
+          "file": "demo-app/api/src/services/tokenService.ts",
+          "lines": "56-58",
+          "quote": "if (row.revoked_at) {\n      repo.revokeFamily(row.family_id);\n      throw new TokenReuseDetected();"
+        }
+      ],
+      "severity": "blocking"
+    },
+    {
+      "id": "C5",
+      "axis": "guarantees",
+      "claim": "The draft proposes moving async awaits outside a transaction boundary but provides no code to verify that token-reuse detection (the invariant at line 56-58) remains protected inside the transaction when concurrent calls read-check-revoke the same row.",
+      "evidence": [
+        {
+          "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+          "lines": "32-46",
+          "quote": "const revoke = (id: number): void => {\n    db.prepare(\n      \"UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?\"\n    ).run(Date.now(), id);\n  };\n\n  const revokeFamily = (familyId: string): void => {\n    db.prepare(\n      \"UPDATE token_families SET revoked_at = ? WHERE id = ?\"\n    ).run(Date.now(), familyId);"
+        }
+      ],
+      "severity": "major"
+    }
+  ]
+}
