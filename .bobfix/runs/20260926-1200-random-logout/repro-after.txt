@@ -1,3 +1,3 @@
-JSON report written to C:/Users/user/AppData/Local/Temp/bobfix-niF7FH/repro-after.json
-(node:25712) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+JSON report written to C:/Users/user/AppData/Local/Temp/bobfix-BBeOOW/repro-after.json
+(node:15100) ExperimentalWarning: SQLite is an experimental feature and might change at any time
 (Use `node --trace-warnings ...` to show where the warning was created)

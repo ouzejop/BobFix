@@ -1,3 +1,6 @@
-JSON report written to C:/Users/user/AppData/Local/Temp/bobfix-niF7FH/before.json
-(node:17904) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+JSON report written to C:/Users/user/AppData/Local/Temp/bobfix-BBeOOW/before.json
+(node:38420) ExperimentalWarning: SQLite is an experimental feature and might change at any time
 (Use `node --trace-warnings ...` to show where the warning was created)
+
+FAIL  repro: random logout on concurrent refresh (two-tab page reload) access token obtained from a successful /auth/refresh must not be immediately invalidated
+expected 401 to be 200 // Object.is equality
