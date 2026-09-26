@@ -1,0 +1,13 @@
+{
+  "run_id": "20260926-1330-random-logout",
+  "bug_report": "Users are randomly logged out when they refresh the page (French: 'Les utilisateurs sont déconnectés aléatoirement quand ils rafraîchissent la page')",
+  "commit": "128ee7015c6bd1782e5ad458c90cd312866dfe2e",
+  "branch": "ouzfeatgemini",
+  "started_at": "2026-09-26T13:30:00.000Z",
+  "repro_test": {
+    "path": "demo-app/api/tests/repro/random-logout-on-refresh.test.ts",
+    "sha256": "1a59594a3c95dadf00c78d48ecafeec9e77c94d0c9a029d93e6eb8454c02aa40",
+    "failing_assertion": "expect(meRes.status).toBe(200) — access token from winning refresh is immediately rejected by /me with 401",
+    "note": "Test passes on current branch (fix already applied). Bug reproduced by reverting tokenService.ts to non-atomic revoke pattern."
+  }
+}

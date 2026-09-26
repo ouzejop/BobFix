@@ -1,0 +1,35 @@
+{
+  "agent": "trigger-tracer",
+  "evidence": [
+    {
+      "id": "T1",
+      "file": "demo-app/web/src/lib/apiClient.ts:25",
+      "quote": "if (res.status === 401) {\n    const refreshed = await refreshSession();",
+      "significance": "Initiates refresh on any 401 response from protected endpoints"
+    },
+    {
+      "id": "T2",
+      "file": "demo-app/web/src/lib/apiClient.ts:8",
+      "quote": "if (!res.ok) return false;",
+      "significance": "refreshSession() returns false when POST /auth/refresh is not OK (4xx/5xx)"
+    },
+    {
+      "id": "T3",
+      "file": "demo-app/web/src/lib/apiClient.ts:27-28",
+      "quote": "if (!refreshed) {\n      logout();",
+      "significance": "logout() called immediately when refreshSession() returns false"
+    },
+    {
+      "id": "T4",
+      "file": "demo-app/api/src/controllers/refreshController.ts:24-26",
+      "quote": "if (err instanceof InvalidToken || err instanceof TokenReuseDetected) {\n        res.clearCookie(\"rt\");\n        res.status(401).json({ error: \"Unauthorized\" });",
+      "significance": "Token reuse detected during rotate() throws exception → returns 401 to client"
+    },
+    {
+      "id": "T5",
+      "file": "demo-app/api/src/middleware/authMiddleware.ts:19-21",
+      "quote": "if (!fid || repo.isFamilyRevoked(fid)) {\n         res.status(401).json({ error: \"Unauthorized\" });\n         return;",
+      "significance": "Rejects valid JWT with 401 if token family was revoked during concurrent refresh — this is the direct cause of user being logged out even when a winning tab got 200"
+    }
+  ]
+}

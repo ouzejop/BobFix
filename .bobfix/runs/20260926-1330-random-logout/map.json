@@ -1,0 +1,17 @@
+{
+  "entry_points": {
+    "trigger": "demo-app/web/src/lib/apiClient.ts:25 (401 → logout())",
+    "refresh_endpoint": "demo-app/api/src/controllers/refreshController.ts:9 (POST /auth/refresh)",
+    "rotate": "demo-app/api/src/services/tokenService.ts:51 (rotate())",
+    "auth_middleware": "demo-app/api/src/middleware/ (isFamilyRevoked check)",
+    "token_repo": "demo-app/api/src/db/refreshTokenRepo.ts (findByHash, tryClaimToken, revokeFamily)"
+  },
+  "logout_trigger": "apiClient.ts:28 — logout() is called when refreshSession() returns false (i.e. /auth/refresh returns 401)",
+  "key_suspects": [
+    "tokenService.ts:51-84 (rotate function — concurrency handling)",
+    "refreshTokenRepo.ts:44-51 (tryClaimToken atomic UPDATE)",
+    "refreshTokenRepo.ts:53-60 (revokeFamily sweeps all tokens in family)"
+  ],
+  "test_runner": "vitest (demo-app/api/vitest.config.ts)",
+  "repro_test": "demo-app/api/tests/repro/random-logout-on-refresh.test.ts"
+}

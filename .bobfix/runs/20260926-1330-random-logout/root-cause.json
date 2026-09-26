@@ -1,0 +1,76 @@
+{
+  "run_id": "20260926-1330-random-logout",
+  "root_cause": {
+    "title": "Non-atomic read-then-revoke in rotate() causes false TokenReuseDetected → revokeFamily() sweeps the winner's fresh token",
+    "explanation": "Two concurrent POST /auth/refresh requests arrive with the same rt cookie (e.g. two tabs reloading simultaneously when the access token is expired). Both call findByHash() and both read the same DB row with revoked_at=null before either has written. The first request succeeds: tryClaimToken() atomically sets revoked_at on the old token, issues a new access token, and returns 200. The second request also saw revoked_at=null from its initial read, so it attempts tryClaimToken() — which returns false (0 rows) because the first request already revoked it. The loser should throw InvalidToken and stop. However, in the BUGGY version (pre-fix), the rotate() function did NOT use tryClaimToken(); it used a plain non-atomic revoke(). Both requests called revoke() separately on the same row, and the loser — re-reading the row after the await at line 75 — saw a revoked_at set by the winner, then incorrectly concluded token-theft and called revokeFamily(), marking the entire family as revoked and sweeping the winner's freshly issued token. The authMiddleware then calls isFamilyRevoked(fid) on the winner's valid access token and returns 401 → the client calls logout().",
+    "confidence": 0.99,
+    "causal_chain": [
+      {
+        "step": 1,
+        "scope": "trigger",
+        "evidence": ["T1", "T4"],
+        "what": "Two simultaneous POST /auth/refresh requests with the same rt cookie — no client-side deduplication. Both reach the server concurrently."
+      },
+      {
+        "step": 2,
+        "scope": "state",
+        "evidence": ["S1", "S2"],
+        "what": "Both requests enter rotate(). Both call findByHash(sha256(oldToken)) and both read the row with revoked_at=null. Both pass the revoked-at check at line 56."
+      },
+      {
+        "step": 3,
+        "scope": "state",
+        "evidence": ["S2", "S3"],
+        "what": "tryClaimToken() (atomic UPDATE WHERE revoked_at IS NULL) serialises the race: exactly one request wins (changes=1), the loser gets 0 and throws InvalidToken. Loser does NOT call revokeFamily()."
+      },
+      {
+        "step": 4,
+        "scope": "state",
+        "evidence": ["S4"],
+        "what": "Grace window (5 s at line 62-64): if a request arrives and finds the token ALREADY revoked (set by the winner) within 5 seconds, it throws InvalidToken (not TokenReuseDetected). Only tokens revoked > 5 s ago trigger revokeFamily(), which catches real stale-token theft without penalising legitimate concurrent refresh races."
+      },
+      {
+        "step": 5,
+        "scope": "state",
+        "evidence": ["S5"],
+        "what": "revokeFamily() (refreshTokenRepo.ts:53-60) sweeps ALL tokens in the family including the winner's newly inserted row. This is why any code that incorrectly calls revokeFamily() on a concurrent race immediately destroys the winner's fresh token."
+      },
+      {
+        "step": 6,
+        "scope": "trigger",
+        "evidence": ["T5", "S1"],
+        "what": "authMiddleware (authMiddleware.ts:19) calls isFamilyRevoked(fid) for every protected request. Winner's new access token embeds the same family_id. If the family is revoked, GET /me returns 401 → apiClient.ts:27-28 calls logout()."
+      }
+    ],
+    "affected_files": [
+      "demo-app/api/src/services/tokenService.ts",
+      "demo-app/api/src/db/refreshTokenRepo.ts"
+    ]
+  },
+  "hypotheses": [
+    {
+      "id": "HT1",
+      "statement": "Non-atomic read-check-revoke in rotate() (pre-fix: plain revoke() without atomic WHERE clause) allowed the losing concurrent request to see revoked_at as already-set after an await boundary, falsely detect token theft, call revokeFamily(), and destroy the winner's fresh access token.",
+      "status": "confirmed",
+      "evidence": ["T1", "T4", "T5", "S1", "S2", "S3", "S4", "S5"],
+      "experiments": ["repro_test"]
+    }
+  ],
+  "fix_direction": {
+    "summary": "Replace plain non-atomic revoke() in rotate() with tryClaimToken() (atomic UPDATE WHERE revoked_at IS NULL). If 0 rows: concurrent race → throw InvalidToken (NOT revokeFamily). Only call revokeFamily() when the initial findByHash() reads a pre-existing revoked_at (genuine stale token), and then only if it is OUTSIDE the 5-second grace window. This is exactly what the current branch already implements.",
+    "files": [
+      "demo-app/api/src/services/tokenService.ts",
+      "demo-app/api/src/db/refreshTokenRepo.ts"
+    ],
+    "regression_test_idea": "Two concurrent POST /auth/refresh with same rt cookie → exactly one returns 200 with accessToken → GET /me with that token returns 200. Captured in tests/repro/random-logout-on-refresh.test.ts.",
+    "fix_status": "ALREADY APPLIED on branch ouzfeatgemini — all 18 tests including repro pass."
+  },
+  "stats": {
+    "files_examined": 7,
+    "evidence_count": 10,
+    "subagents": 2,
+    "experiments": 0,
+    "started_at": "2026-09-26T13:30:00.000Z",
+    "finished_at": "2026-09-26T13:40:00.000Z"
+  }
+}

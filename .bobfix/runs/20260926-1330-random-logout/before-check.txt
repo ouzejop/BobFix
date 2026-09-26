@@ -1,0 +1,19 @@
+
+[7m[1m[36m RUN [39m[22m[27m [36mv1.6.1[39m [90mC:/Users/user/Documents/Projects/BobFix/demo-app/api[39m
+
+node.exe : (node:27804) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+Au caractère Ligne:1 : 1
++ & "C:\Program Files\nodejs/node.exe" "C:\Users\user\AppData\Roaming\n ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ((node:27804) Ex...nge at any time:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+(Use `node --trace-warnings ...` to show where the warning was created)
+ [32mÔ£ô[39m tests/repro/random-logout-on-refresh.test.ts[2m > [22mrepro: random logout on concurrent refresh (two-tab page reload)[2m > [22maccess token obtained from a successful /auth/refresh must not be immediately invalidated[33m 1271[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m   Start at [22m 21:57:53
+[2m   Duration [22m 4.33s[2m (transform 392ms, setup 0ms, collect 1.56s, tests 1.27s, environment 1ms, prepare 675ms)[22m
+
+

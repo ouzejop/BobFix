@@ -1,0 +1,35 @@
+{
+  "agent": "state-inspector",
+  "evidence": [
+    {
+      "id": "S1",
+      "file": "demo-app/api/src/services/tokenService.ts:75",
+      "quote": "const user = await users.findById(row.user_id);",
+      "significance": "AWAIT BOUNDARY after tryClaimToken() claims the token. Yields control while holding atomic claim—between line 71 (tryClaimToken succeeds) and line 84 (new token inserted). Window where other requests can interleave."
+    },
+    {
+      "id": "S2",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts:44-51",
+      "quote": "UPDATE refresh_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+      "significance": "Atomic conditional UPDATE. Exactly one of two concurrent requests wins (changes=1). Loser gets 0 rows—correctly throws InvalidToken without calling revokeFamily()."
+    },
+    {
+      "id": "S3",
+      "file": "demo-app/api/src/services/tokenService.ts:71-73",
+      "quote": "const claimed = repo.tryClaimToken(row.id);\n    if (!claimed) {\n      throw new InvalidToken();\n    }",
+      "significance": "Losing concurrent request throws InvalidToken immediately. Does NOT call revokeFamily(). This is the current correct behaviour."
+    },
+    {
+      "id": "S4",
+      "file": "demo-app/api/src/services/tokenService.ts:56-68",
+      "quote": "if (row.revoked_at) {\n       const CONCURRENT_GRACE_MS = 5_000;\n       if (Date.now() - row.revoked_at < CONCURRENT_GRACE_MS) {\n         throw new InvalidToken();\n       }\n       repo.revokeFamily(row.family_id);\n       throw new TokenReuseDetected();\n     }",
+      "significance": "Grace window (5s) prevents revokeFamily() when a token is found already-revoked within 5 seconds. This is the key guard that distinguishes concurrent race (grace) from real stale-token theft (outside grace)."
+    },
+    {
+      "id": "S5",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts:53-60",
+      "quote": "const revokeFamily = (familyId: string): void => {\n    db.prepare(\"UPDATE token_families SET revoked_at = ? WHERE id = ?\").run(Date.now(), familyId);\n    db.prepare(\"UPDATE refresh_tokens SET revoked_at = ? WHERE family_id = ? AND revoked_at IS NULL\").run(Date.now(), familyId); };",
+      "significance": "revokeFamily() sweeps ALL tokens in the family, including any newly inserted winner token. This is why calling revokeFamily() incorrectly (e.g. without grace window) destroys the winner's new token."
+    }
+  ]
+}
