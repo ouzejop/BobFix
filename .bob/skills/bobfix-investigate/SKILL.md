@@ -1,64 +1,63 @@
 ---
 name: bobfix-investigate
-description: Investigate a bug report with the scientific method — reproduce it with a frozen test, gather hypotheses from parallel explore subagents, then confirm or kill each hypothesis with a small experiment, and write an experiment-backed root-cause report under .bobfix/runs/.
+description: Fast, token-efficient multi-agent bug investigation — reproduce with a single frozen test, triangulate via two parallel subagents (trigger vs state), and synthesize an experiment-backed root cause without redundant loops or chat bloat.
 ---
-You are running a BobFix investigation. Reading code produces hypotheses;
-only running code produces conclusions.
+You are running a Lean BobFix investigation. Reading code produces hypotheses;
+running code produces conclusions. You never waste tokens or flood the chat.
 
 <Steps>
 <Step>
-Create `.bobfix/runs/<run-id>/` (`YYYYMMDD-HHMM-<short-slug>`). Write `bug.json`
-with the bug report, `git rev-parse HEAD` and the start time (ISO 8601).
+INITIALIZE & PRE-FILTER.
+Create `.bobfix/runs/<run-id>/` (`YYYYMMDD-HHMM-<short-slug>`).
+Write `bug.json` with the bug report, `git rev-parse HEAD` and start time (ISO 8601).
+Perform deterministic search (grep / ripgrep in at most 2 calls) to locate relevant entrypoints,
+error messages, and test runner configuration. Write `map.json`.
+Print in chat: `🔍 [1/4] Bug report catalogué et points d'entrée repérés.`
 </Step>
+
 <Step>
-Map the repository in at most 3 tool calls (tree, manifests, how tests run).
-Write `map.json`: the parts of the system and how to run one test file.
+REPRODUCE (Frozen Test).
+Using ONLY the bug report and entry points, write ONE reproduction test under `tests/repro/`
+that drives the system through its public interface and asserts what the user expects.
+For any time-dependent scenarios, ALWAYS use fake/mocked timers (`vi.useFakeTimers()`) — NEVER wait for real delays.
+Run the test: it MUST fail.
+Compute SHA-256 of the test file and record in `bug.json`: `repro_test: { path, sha256 }` (hex digest, never null) and the failing assertion.
+This test is permanently frozen: nobody edits it afterwards.
+Print in chat: `❌ [2/4] Bug fidèlement reproduit (Test gelé sous tests/repro/).`
 </Step>
+
 <Step>
-REPRODUCE. Using ONLY the bug report, write ONE test that drives the system through
-its public interface (HTTP endpoint, CLI, UI component, public function) and
-asserts what the user expects. No guess about the cause.
-Symptom first: find in the code what directly PRODUCES the reported symptom (e.g.
-which responses make the client log out, show an error, charge twice, drop data).
-Replay the WHOLE user scenario — every call the client makes in it, in the way it
-makes them (sequential, parallel, retried) — and assert that NONE of them produces
-that trigger. A fix that leaves the user-visible symptom in place must fail this
-test, even if part of the scenario succeeds. If the layer that shows the symptom
-cannot be tested in this repo, test at the next layer down and write in bug.json
-which client behaviour you are standing in for. Put it in the test folder
-under `repro/`. Run it: it MUST fail. If it passes, change the scenario (never the
-user-visible assertion), up to 3 tries. Record in `bug.json`:
-`repro_test: { path, sha256 }` (`sha256sum`) and the failing output.
-This test is frozen: nobody edits it afterwards.
+PARALLEL MULTI-AGENT TRIANGULATION.
+Spawn exactly TWO specialized subagents in parallel in a SINGLE tool call (see `subagent-briefs.md`):
+1. `trigger-tracer` (Scope: client / API entrypoint / error status received by caller)
+2. `state-inspector` (Scope: server core / state transitions / persistence / timing checks)
+Instructions to subagents:
+- Write detailed findings directly to `.bobfix/runs/<run-id>/evidence-<scope>.json`.
+- In their chat response, return ONLY a concise 3-bullet summary. Do NOT dump raw JSON into the chat.
+Print in chat: `🤝 [3/4] Triangulation multi-agents (Trigger vs State) complétée.`
 </Step>
+
 <Step>
-HYPOTHESES. Choose 1 to 5 scopes: one per distinct part of the system on the path
-from the trigger to the failure (see `subagent-briefs.md`); justify each in
-`map.json`. Spawn one explore subagent per scope, ALL IN PARALLEL in a single step.
-Save each answer as `evidence-<scope>.json`. Each hypothesis comes with an
-experiment idea.
+SYNTHESIS & ROOT CAUSE.
+Read the two evidence files from disk.
+Synthesize the findings into at most ONE high-confidence causal chain.
+In `fix_direction`, define the functional requirements and relevant domain architectural
+patterns (e.g. concurrency grace window, atomic claims, idempotent transactions).
+Never prematurely forbid standard industry patterns.
+The frozen repro test proves the end-to-end failure. If an internal invariant needs
+targeted verification before fixing, run at most ONE micro-test under `tests/experiments/`
+(using fake timers), record in `experiments.json`, and move it into `.bobfix/runs/<run-id>/experiments/`.
+Write `root-cause.json` following `report-template.md`.
 </Step>
+
 <Step>
-EXPERIMENTS. For every hypothesis with confidence ≥ 0.3 (at most 5), write the
-smallest test that would PASS if the hypothesis is true and FAIL if it is false
-(e.g. call the two operations in the suspected order and assert the suspected
-state). Put it in the test folder under `experiments/`, run it, and record in
-`experiments.json`: hypothesis id, file, command, exit code, key output lines,
-verdict `confirmed` / `refuted` / `inconclusive`. Then move the experiment files
-into `.bobfix/runs/<run-id>/experiments/` so they never join the test suite.
-If an experiment reveals a new trigger or path, you may spawn ONE more explore
-subagent on it, then experiment again.
-</Step>
-<Step>
-ROOT CAUSE. Write `root-cause.json` following `report-template.md`. The root cause
-must be a hypothesis CONFIRMED by an experiment; each step of the causal chain cites
-evidence ids and experiment ids. List refuted hypotheses with the experiment that
-killed them. Fix direction: what must change and where, so that the frozen repro
-test passes in every trigger the experiments revealed — no code.
-</Step>
-<Step>
-Summarise for the user: repro test (failing), hypotheses tested, confirmed cause,
-refuted ones, fix direction. End with:
-"Switch to BobFix Fixer to apply and verify the fix."
+USER SUMMARY (Clean & Readable).
+Output a clean, concise markdown summary table in the chat (NO raw JSON, NO code dumps):
+- **Repro Test**: path and failing assertion
+- **Root Cause**: concise 2-sentence mechanism (files & lines)
+- **Fix Direction**: what must change
+End with:
+"Switch to **BobFix Fixer** to apply and verify the fix."
 </Step>
 </Steps>
+

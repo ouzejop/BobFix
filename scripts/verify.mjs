@@ -15,9 +15,20 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, copyFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, platform } from "node:os";
 import { createHash } from "node:crypto";
 import { dirname, join, relative } from "node:path";
+
+/** On Windows, directory symlinks require elevated privileges; use a junction instead. */
+function linkDir(src, dst) {
+  if (platform() === "win32") {
+    spawnSync("cmd", ["/c", "mklink", "/J", dst, src], { encoding: "utf8" });
+  } else {
+    symlinkSync(src, dst, "dir");
+  }
+}
+/** Convert any backslashes to forward slashes (for vitest CLI on Windows). */
+function toSlash(p) { return p.replace(/\\/g, "/"); }
 
 const args = Object.fromEntries(
   process.argv.slice(2).reduce((acc, a, i, all) => (a.startsWith("--") ? [...acc, [a.slice(2), all[i + 1]]] : acc), [])
@@ -111,17 +122,17 @@ try {
   for (const dir of dirs) {
     const src = join(root, dir, "node_modules");
     const dst = join(wt, dir, "node_modules");
-    if (existsSync(src) && !existsSync(dst)) symlinkSync(src, dst, "dir");
+    if (existsSync(src) && !existsSync(dst)) linkDir(src, dst);
   }
-  before = vitest(join(wt, appRel), relative(appRel, args.test), "before");
-  if (repro && reproIntact) reproBefore = vitest(join(wt, appRel), relative(appRel, repro.path), "repro-before");
+  before = vitest(join(wt, appRel), toSlash(relative(appRel, args.test)), "before");
+  if (repro && reproIntact) reproBefore = vitest(join(wt, appRel), toSlash(relative(appRel, repro.path)), "repro-before");
 } finally {
   git("worktree", "remove", "--force", wt);
 }
 
 // 2. Fixed commit, regression test alone → must pass
-const after = vitest(join(root, appRel), relative(appRel, args.test), "after");
-const reproAfter = repro && reproIntact ? vitest(join(root, appRel), relative(appRel, repro.path), "repro-after") : null;
+const after = vitest(join(root, appRel), toSlash(relative(appRel, args.test)), "after");
+const reproAfter = repro && reproIntact ? vitest(join(root, appRel), toSlash(relative(appRel, repro.path)), "repro-after") : null;
 // 3. Fixed commit, full suite → must pass
 const suite = vitest(join(root, appRel), null, "suite");
 // 4. Optional build

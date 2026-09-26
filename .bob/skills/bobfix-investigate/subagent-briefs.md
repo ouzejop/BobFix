@@ -1,37 +1,28 @@
-# Investigator brief (one per scope)
+# Triangulation Subagent Briefs (Trigger vs State)
 
-Choose 1 to 5 scopes from `map.json` — the parts of the system
-the bug report's flow passes through (for example: client/UI, request handling and
-business logic, persistence, integrations with external services, webhooks,
-queues and background jobs, scheduled tasks, configuration). Pick scopes that
-together cover the whole path from the user-visible symptom to where state is
-stored or decided. Give each a short kebab-case name (e.g. `client`, `checkout-api`,
-`payments-webhook`) and a one-letter evidence prefix (first letter, upper case,
-unique across scopes).
+BobFix uses **Lean Multi-Agent Triangulation** with exactly TWO parallel subagents:
+1. **`trigger-tracer`** (Scope: entry points, requests, client scenario, error return paths)
+   Evidence prefix: `T` (e.g. T1, T2)
+2. **`state-inspector`** (Scope: internal business logic, persistence, token lifecycle, concurrency)
+   Evidence prefix: `S` (e.g. S1, S2)
 
-Send the brief below to each explore subagent, replacing `{BUG}`, `{SCOPE}`,
-`{PATHS}`, `{NAME}` and `{PREFIX}`. Do not add your own guesses about the cause.
+Send the brief below to each subagent in parallel, replacing `{BUG}`, `{SCOPE}`, `{PATHS}`, `{ROLE}`, `{PREFIX}`, and `{RUN_DIR}`.
 
 ```
 Bug report: {BUG}
-Scope: {SCOPE} only — {PATHS}
+Role: {ROLE}
+Scope: {SCOPE} — {PATHS}
 
-Trace the flow that produces the reported symptom through this scope:
-- entry points: what triggers this code (user actions, requests, events,
-  callbacks, jobs, timers) and how often or how many times it can be triggered;
-- state: what it reads and writes, in what order, and what decides success or
-  failure;
-- ordering: every await / callback / network or database call, and what happens
-  if the same flow runs twice, concurrently, out of order, or is retried;
-- failure paths: what happens on errors, timeouts or unexpected responses, and
-  whether those paths are visible to the user or silently swallowed;
-- boundaries: what this scope assumes about the other parts of the system.
+Analyze your assigned scope to locate why the reported bug occurs:
+- If trigger-tracer: trace how the request/event is triggered, concurrency/ordering, and what response is returned to the caller.
+- If state-inspector: trace internal state changes, persistence, timing/expiry checks, and why the failure state is triggered.
 
-Quote exact code (file + line range) for every piece of evidence.
-Do not propose code. Report hypotheses with a confidence between 0 and 1, including ones your
-evidence contradicts. For each hypothesis, add "experiment": the smallest test
-that would pass only if the hypothesis is true (what to call, in which order,
-what to assert).
-Return JSON per evidence.schema.json with "agent": "{NAME}-investigator"
-and evidence ids {PREFIX}1, {PREFIX}2, ...
+CRITICAL INSTRUCTIONS FOR CHAT HYGIENE & TOKEN EFFICIENCY:
+1. Save the full JSON analysis directly to: {RUN_DIR}/evidence-{SCOPE}.json
+   (following evidence.schema.json with agent "{ROLE}" and evidence IDs {PREFIX}1, {PREFIX}2...).
+2. In your text response, DO NOT PRINT THE JSON. Return ONLY a concise 3-bullet summary:
+   - 📍 Suspect files & lines (file:line range)
+   - 🔍 Observed anomaly or invariant breach
+   - 💡 Top hypothesis (1-2 sentences, confidence 0.0-1.0)
 ```
+
