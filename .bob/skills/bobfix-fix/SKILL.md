@@ -54,7 +54,9 @@ IF status is NOT_VERIFIED:
   Check if tests actually executed:
   - Did any test run have `ran: false`, `total: 0`, or logs containing "No test files found", "command not found", or "EPERM"?
   - If YES: this is an ENVIRONMENT / HARNESS failure, NOT an application code bug!
-    Do NOT touch application code in `demo-app/`.
+    HARNESS BUDGET LIMIT: You are allowed AT MOST 1 attempt to diagnose and repair the harness/environment.
+    If the harness fails a second time, you MUST STOP immediately, write the failure reason to verification.json, output the status NOT_VERIFIED, and terminate the turn. Never enter a retry loop on harness issues.
+
     Diagnose the harness/environment failure:
     1. Cross-platform path separators: On Windows, test runners (Vitest, Jest) and glob matchers treat backslashes `\` as escape characters. Test paths passed to the runner CLI must use forward slashes `/`.
     2. Symlink vs Junction: On Windows, directory symlinks require admin rights; directory junctions (`mklink /J`) must be used for temporary worktrees.
