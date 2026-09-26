@@ -54,7 +54,13 @@ export function makeTokenService(db: BetterDb) {
       throw new InvalidToken();
     }
     if (row.revoked_at) {
-      // Token was already revoked at initial read — genuine reuse by a stale token.
+      // The token was already revoked when we read it. Distinguish two cases:
+      // (a) Concurrent legitimate refresh: another request already rotated this token
+      //     and a live successor token exists in the family — do NOT revoke the family.
+      // (b) Genuine stale-token reuse (theft): no live successor exists → revoke family.
+      if (repo.familyHasLiveToken(row.family_id)) {
+        throw new InvalidToken();
+      }
       repo.revokeFamily(row.family_id);
       throw new TokenReuseDetected();
     }
