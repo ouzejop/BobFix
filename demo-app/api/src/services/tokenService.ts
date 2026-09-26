@@ -54,13 +54,19 @@ export function makeTokenService(db: BetterDb) {
       throw new InvalidToken();
     }
     if (row.revoked_at) {
-      // Token was already revoked at initial read — genuine reuse by a stale token.
+      // Token was already revoked. Distinguish genuine stale-token reuse (attacker)
+      // from a concurrent legitimate refresh race (another tab won):
+      // If a live successor token exists in the family, the race was already won by
+      // a concurrent request — treat as InvalidToken, do NOT revoke the family.
+      // Only call revokeFamily when there is no live successor (genuine theft per RFC 6819).
+      if (repo.hasLiveToken(row.family_id)) {
+        throw new InvalidToken();
+      }
       repo.revokeFamily(row.family_id);
       throw new TokenReuseDetected();
     }
-    // Atomically claim the token. If another concurrent request already claimed it,
-    // treat it as a lost race (InvalidToken), NOT as genuine reuse — do NOT revoke
-    // the family, because the winning request's fresh token is still valid.
+    // Atomically claim the token. If another concurrent request already claimed it
+    // (changes = 0), the loser throws InvalidToken without touching the family.
     const claimed = repo.tryClaimToken(row.id);
     if (!claimed) {
       throw new InvalidToken();
