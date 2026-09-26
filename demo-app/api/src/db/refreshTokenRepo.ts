@@ -1,4 +1,4 @@
-import Database from "better-sqlite3";
+import type { BetterDb } from "./connection.js";
 
 export interface RefreshTokenRow {
   id: number;
@@ -10,7 +10,7 @@ export interface RefreshTokenRow {
   revoked_at: number | null;
 }
 
-export function makeRefreshTokenRepo(db: Database.Database) {
+export function makeRefreshTokenRepo(db: BetterDb) {
   const findByHash = (hash: string): RefreshTokenRow | undefined => {
     return db
       .prepare<[string], RefreshTokenRow>(

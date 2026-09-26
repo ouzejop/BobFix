@@ -1,5 +1,5 @@
 import bcrypt from "bcryptjs";
-import Database from "better-sqlite3";
+import type { BetterDb } from "./connection.js";
 
 const USERS = [
   { email: "alice@shoply.test", name: "Alice" },
@@ -7,7 +7,7 @@ const USERS = [
   { email: "carol@shoply.test", name: "Carol" },
 ];
 
-export function seed(db: Database.Database): void {
+export function seed(db: BetterDb): void {
   const insert = db.prepare(
     "INSERT OR IGNORE INTO users (email, password_hash, name) VALUES (?, ?, ?)"
   );

@@ -1,4 +1,4 @@
-import Database from "better-sqlite3";
+import type { BetterDb } from "./connection.js";
 
 export interface UserRow {
   id: number;
@@ -7,7 +7,7 @@ export interface UserRow {
   name: string;
 }
 
-export function makeUserRepo(db: Database.Database) {
+export function makeUserRepo(db: BetterDb) {
   const findByEmail = (email: string): UserRow | undefined => {
     return db
       .prepare<[string], UserRow>("SELECT * FROM users WHERE email = ?")

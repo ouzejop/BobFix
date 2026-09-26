@@ -3,9 +3,9 @@ import bcrypt from "bcryptjs";
 import { makeUserRepo } from "../db/userRepo.js";
 import { makeTokenService } from "../services/tokenService.js";
 import { REFRESH_TOKEN_TTL_DAYS } from "../config.js";
-import Database from "better-sqlite3";
+import type { BetterDb } from "../db/connection.js";
 
-export function makeAuthController(db: Database.Database) {
+export function makeAuthController(db: BetterDb) {
   const users = makeUserRepo(db);
   const tokenService = makeTokenService(db);
 

@@ -1,9 +1,9 @@
 import { Request, Response, NextFunction } from "express";
 import { verifyAccessToken } from "../services/tokenService.js";
 import { makeRefreshTokenRepo } from "../db/refreshTokenRepo.js";
-import Database from "better-sqlite3";
+import type { BetterDb } from "../db/connection.js";
 
-export function makeAuthMiddleware(db: Database.Database) {
+export function makeAuthMiddleware(db: BetterDb) {
   const repo = makeRefreshTokenRepo(db);
 
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {

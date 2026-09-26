@@ -3,7 +3,7 @@ import { randomBytes, createHash } from "crypto";
 import { ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL_DAYS, JWT_SECRET } from "../config.js";
 import { makeRefreshTokenRepo, type RefreshTokenRow } from "../db/refreshTokenRepo.js";
 import { makeUserRepo, type UserRow } from "../db/userRepo.js";
-import Database from "better-sqlite3";
+import type { BetterDb } from "../db/connection.js";
 
 export class InvalidToken extends Error {
   constructor() {
@@ -34,7 +34,7 @@ export async function signAccessToken(user: UserRow, familyId: string): Promise<
     .sign(secretBytes);
 }
 
-export function makeTokenService(db: Database.Database) {
+export function makeTokenService(db: BetterDb) {
   const repo = makeRefreshTokenRepo(db);
   const users = makeUserRepo(db);
 

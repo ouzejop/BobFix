@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
-import Database from "better-sqlite3";
+import type { BetterDb } from "../db/connection.js";
 
-export function makeShopController(db: Database.Database) {
+export function makeShopController(db: BetterDb) {
   const me = (req: Request, res: Response): void => {
     const userId = (req as Request & { userId: number }).userId;
     const user = db

@@ -1,12 +1,12 @@
 import express from "express";
 import cookieParser from "cookie-parser";
-import Database from "better-sqlite3";
+import type { BetterDb } from "./db/connection.js";
 import { makeAuthController } from "./controllers/authController.js";
 import { makeRefreshController } from "./controllers/refreshController.js";
 import { makeShopController } from "./controllers/shopController.js";
 import { makeAuthMiddleware } from "./middleware/authMiddleware.js";
 
-export function createApp(db: Database.Database) {
+export function createApp(db: BetterDb) {
   const app = express();
   app.use(express.json());
   app.use(cookieParser());

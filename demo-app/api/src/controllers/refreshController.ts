@@ -1,9 +1,9 @@
 import { Request, Response } from "express";
 import { makeTokenService, InvalidToken, TokenReuseDetected } from "../services/tokenService.js";
 import { REFRESH_TOKEN_TTL_DAYS } from "../config.js";
-import Database from "better-sqlite3";
+import type { BetterDb } from "../db/connection.js";
 
-export function makeRefreshController(db: Database.Database) {
+export function makeRefreshController(db: BetterDb) {
   const tokenService = makeTokenService(db);
 
   const refresh = async (req: Request, res: Response): Promise<void> => {
