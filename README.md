@@ -20,7 +20,18 @@ Built for the **IBM Bob 2.0 Hackathon** (lablab.ai, September 2026).
 
 ---
 
-### Quick Start in IBM Bob IDE
+### Universal Quick Start (Windows, Linux, macOS)
+
+Run the single setup command to verify the environment, install dependencies cleanly without C++ build tool requirements, and configure skills:
+
+```bash
+npm run setup
+```
+*(or `node scripts/setup.mjs` — add `--global` to install skills globally into your user profile)*
+
+---
+
+### Running in IBM Bob IDE / Agentic IDEs
 
 1. **Open repository**: Open this folder in IBM Bob IDE (`File > Open Folder...`).
 2. **Investigate**: Switch mode to **"BobFix Investigator"** and send your bug report:

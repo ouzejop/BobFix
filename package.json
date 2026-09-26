@@ -1,0 +1,17 @@
+{
+  "name": "bobfix",
+  "version": "1.0.0",
+  "description": "Lean Multi-Agent Bug Investigation for IBM Bob IDE & Agentic Coding",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "test": "npm --prefix demo-app/api test",
+    "verify": "node scripts/verify.mjs"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": ["multi-agent", "bob", "debugging", "verification", "benchmark"],
+  "license": "MIT"
+}
