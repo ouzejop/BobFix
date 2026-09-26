@@ -103,6 +103,11 @@ function generic(cwd, testFile, label) {
 }
 
 // 1. Buggy commit + the new regression test → must fail
+// --harness-files: comma-separated repo-root-relative paths to copy from HEAD into
+// the base worktree so that environment/harness fixes reach the "before" run
+// without touching application logic files.
+const harnessFiles = args["harness-files"] ? args["harness-files"].split(",").map((s) => s.trim()).filter(Boolean) : [];
+
 const wt = join(scratch, "base");
 git("worktree", "add", "--detach", wt, baseSha);
 let before;
@@ -115,6 +120,15 @@ try {
     const rdest = join(wt, repro.path);
     mkdirSync(dirname(rdest), { recursive: true });
     copyFileSync(join(root, repro.path), rdest);
+  }
+  // Copy harness-only files from HEAD into the base worktree (e.g. db adapter, vitest config).
+  for (const hf of harnessFiles) {
+    const hsrc = join(root, hf);
+    const hdst = join(wt, hf);
+    if (existsSync(hsrc)) {
+      mkdirSync(dirname(hdst), { recursive: true });
+      copyFileSync(hsrc, hdst);
+    }
   }
   // link node_modules of every directory from the repo root down to the app (npm workspaces hoist them)
   const parts = appRel.split("/").filter((s) => s && s !== ".");
