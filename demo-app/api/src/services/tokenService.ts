@@ -1,6 +1,6 @@
 import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 import { randomBytes, createHash } from "crypto";
-import { ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL_DAYS, JWT_SECRET } from "../config.js";
+import { ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL_DAYS, JWT_SECRET, CONCURRENT_REFRESH_GRACE_MS } from "../config.js";
 import { makeRefreshTokenRepo } from "../db/refreshTokenRepo.js";
 import { makeUserRepo, type UserRow } from "../db/userRepo.js";
 import type { BetterDb } from "../db/connection.js";
@@ -54,11 +54,11 @@ export function makeTokenService(db: BetterDb) {
       throw new InvalidToken();
     }
     if (row.revoked_at) {
-      // The token was already revoked when we read it. Distinguish two cases:
-      // (a) Concurrent legitimate refresh: another request already rotated this token
-      //     and a live successor token exists in the family — do NOT revoke the family.
-      // (b) Genuine stale-token reuse (theft): no live successor exists → revoke family.
-      if (repo.familyHasLiveToken(row.family_id)) {
+      // Distinguish a concurrent legitimate refresh race from genuine stale-token reuse:
+      // If the token was revoked very recently (within the grace window), another request
+      // won the race moments ago — return InvalidToken without revoking the family.
+      // If it was revoked long ago, it is genuine token theft — revoke the entire family.
+      if (Date.now() - row.revoked_at <= CONCURRENT_REFRESH_GRACE_MS) {
         throw new InvalidToken();
       }
       repo.revokeFamily(row.family_id);

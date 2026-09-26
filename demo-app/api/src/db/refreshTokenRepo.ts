@@ -68,26 +68,13 @@ export function makeRefreshTokenRepo(db: BetterDb) {
     return row == null || row.revoked_at != null;
   };
 
-  /**
-   * Returns true if the family has at least one non-revoked, non-expired token.
-   * Used to distinguish a legitimate concurrent-refresh race from genuine token reuse.
-   */
-  const familyHasLiveToken = (familyId: string): boolean => {
-    const row = db
-      .prepare<[string, number], { id: number }>(
-        "SELECT id FROM refresh_tokens WHERE family_id = ? AND revoked_at IS NULL AND expires_at > ? LIMIT 1"
-      )
-      .get(familyId, Date.now());
-    return row != null;
-  };
-
   const createFamily = (id: string, userId: number): void => {
     db.prepare(
       "INSERT INTO token_families (id, user_id, created_at) VALUES (?, ?, ?)"
     ).run(id, userId, Date.now());
   };
 
-  return { findByHash, insert, revoke, tryClaimToken, revokeFamily, isFamilyRevoked, familyHasLiveToken, createFamily };
+  return { findByHash, insert, revoke, tryClaimToken, revokeFamily, isFamilyRevoked, createFamily };
 }
 
 export type RefreshTokenRepo = ReturnType<typeof makeRefreshTokenRepo>;
