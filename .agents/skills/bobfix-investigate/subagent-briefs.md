@@ -17,12 +17,10 @@ Analyze your assigned scope to locate why the reported bug occurs:
 - If trigger-tracer: trace how the request/event is triggered, concurrency/ordering, and what response is returned to the caller.
 - If state-inspector: trace internal state changes, persistence, timing/expiry checks, and why the failure state is triggered.
 
-CRITICAL INSTRUCTIONS FOR CHAT HYGIENE & TOKEN EFFICIENCY:
-1. Save the full JSON analysis directly to: {RUN_DIR}/evidence-{SCOPE}.json
-   (following evidence.schema.json with agent "{ROLE}" and evidence IDs {PREFIX}1, {PREFIX}2...).
-2. In your text response, DO NOT PRINT THE JSON. Return ONLY a concise 3-bullet summary:
-   - 📍 Suspect files & lines (file:line range)
-   - 🔍 Observed anomaly or invariant breach
-   - 💡 Top hypothesis (1-2 sentences, confidence 0.0-1.0)
+CRITICAL INSTRUCTIONS FOR TOKEN EFFICIENCY:
+1. Your ENTIRE response is one compact JSON object following evidence.schema.json,
+   with agent "{ROLE}" and evidence IDs {PREFIX}1, {PREFIX}2... No prose around it.
+   The main agent writes it to {RUN_DIR}/evidence-{SCOPE}.json.
+2. Any claim that two requests interleave cites the file:line of the `await` that allows it.
 ```
 

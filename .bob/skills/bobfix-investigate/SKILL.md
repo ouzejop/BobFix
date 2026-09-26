@@ -19,6 +19,10 @@ Print in chat: `🔍 [1/4] Bug report catalogué et points d'entrée repérés.`
 REPRODUCE (Frozen Test).
 Using ONLY the bug report and entry points, write ONE reproduction test under `tests/repro/`
 that drives the system through its public interface and asserts what the user expects.
+Symptom first: find in the client code what directly PRODUCES the reported symptom (e.g. which
+response makes the client log out). Replay every call of the user scenario the way the client
+makes it (sequential, parallel, retried) and assert that NONE of them produces that trigger.
+A test that tolerates the trigger on one of the calls does not reproduce the bug.
 For any time-dependent scenarios, ALWAYS use fake/mocked timers (`vi.useFakeTimers()`) — NEVER wait for real delays.
 Run the test: it MUST fail.
 Compute SHA-256 of the test file and record in `bug.json`: `repro_test: { path, sha256 }` (hex digest, never null) and the failing assertion.
@@ -32,8 +36,8 @@ Spawn exactly TWO specialized subagents in parallel in a SINGLE tool call (see `
 1. `trigger-tracer` (Scope: client / API entrypoint / error status received by caller)
 2. `state-inspector` (Scope: server core / state transitions / persistence / timing checks)
 Instructions to subagents:
-- Write detailed findings directly to `.bobfix/runs/<run-id>/evidence-<scope>.json`.
-- In their chat response, return ONLY a concise 3-bullet summary. Do NOT dump raw JSON into the chat.
+- Subagents may be read-only: they return ONLY their evidence as compact JSON (evidence.schema.json).
+- You write each answer to `.bobfix/runs/<run-id>/evidence-<scope>.json` without echoing it in chat.
 Print in chat: `🤝 [3/4] Triangulation multi-agents (Trigger vs State) complétée.`
 </Step>
 
@@ -41,6 +45,10 @@ Print in chat: `🤝 [3/4] Triangulation multi-agents (Trigger vs State) complé
 SYNTHESIS & ROOT CAUSE.
 Read the two evidence files from disk.
 Synthesize the findings into at most ONE high-confidence causal chain.
+Every step that relies on an ordering or interleaving of concurrent requests cites the file:line
+of the `await` (or other suspension point) that allows it. If the code between a read and the
+write that depends on it is synchronous, that interleaving cannot happen: drop it and re-read the code.
+The fix direction must make the frozen repro test pass on EVERY call of the scenario, not only one.
 In `fix_direction`, define the functional requirements and relevant domain architectural
 patterns (e.g. concurrency grace window, atomic claims, idempotent transactions).
 Never prematurely forbid standard industry patterns.

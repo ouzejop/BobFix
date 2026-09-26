@@ -16,3 +16,6 @@
    ONE high-confidence causal chain backed by the failing repro test.
 7. Evidence is an exact quote with file path and line range; confidence values are
    judgements, never presented as measurements.
+8. The repro test asserts that no call of the user scenario produces what makes the client show
+   the symptom (e.g. a 401 that triggers logout). Tolerating it on one call is not a repro.
+9. A claim that two requests interleave cites the file:line of the `await` that allows it.

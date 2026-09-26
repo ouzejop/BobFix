@@ -74,11 +74,19 @@ function vitest(cwd, testFile, label) {
   const started = Date.now();
   const p = spawnSync("npx", cliArgs, { cwd, encoding: "utf8", shell: true, env: { ...process.env, CI: "1" } });
   const output = `${p.stdout ?? ""}${p.stderr ?? ""}`;
-  writeFileSync(join(runDir, `${label}.txt`), output);
   let r = null;
   try {
     r = JSON.parse(readFileSync(report, "utf8"));
   } catch {}
+  // The json reporter prints almost nothing to the console and the report is deleted with
+  // `scratch`: copy the failing assertions (first lines only) into the log the agent reads.
+  const head = (s) => String(s).split("\n").slice(0, 12).join("\n");
+  const failures = (r?.testResults ?? []).flatMap((f) => {
+    const failed = (f.assertionResults ?? []).filter((a) => a.status === "failed");
+    if (failed.length === 0) return f.status === "failed" && f.message ? [`FAIL ${f.name}\n${head(f.message)}`] : [];
+    return failed.map((a) => `FAIL ${a.fullName}\n${(a.failureMessages ?? []).map(head).join("\n")}`);
+  });
+  writeFileSync(join(runDir, `${label}.txt`), [output, ...failures].join("\n"));
   return {
     exit_code: p.status,
     duration_ms: Date.now() - started,
