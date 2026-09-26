@@ -1,6 +1,6 @@
 import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 import { randomBytes, createHash } from "crypto";
-import { ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL_DAYS, JWT_SECRET, CONCURRENT_REFRESH_GRACE_MS } from "../config.js";
+import { ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL_DAYS, JWT_SECRET } from "../config.js";
 import { makeRefreshTokenRepo } from "../db/refreshTokenRepo.js";
 import { makeUserRepo, type UserRow } from "../db/userRepo.js";
 import type { BetterDb } from "../db/connection.js";
@@ -54,23 +54,10 @@ export function makeTokenService(db: BetterDb) {
       throw new InvalidToken();
     }
     if (row.revoked_at) {
-      // Distinguish a concurrent legitimate refresh race from genuine stale-token reuse:
-      // If the token was revoked very recently (within the grace window), another request
-      // won the race moments ago — return InvalidToken without revoking the family.
-      // If it was revoked long ago, it is genuine token theft — revoke the entire family.
-      if (Date.now() - row.revoked_at <= CONCURRENT_REFRESH_GRACE_MS) {
-        throw new InvalidToken();
-      }
       repo.revokeFamily(row.family_id);
       throw new TokenReuseDetected();
     }
-    // Atomically claim the token. If another concurrent request already claimed it,
-    // treat it as a lost race (InvalidToken), NOT as genuine reuse — do NOT revoke
-    // the family, because the winning request's fresh token is still valid.
-    const claimed = repo.tryClaimToken(row.id);
-    if (!claimed) {
-      throw new InvalidToken();
-    }
+    repo.revoke(row.id);
     const user = await users.findById(row.user_id);
     const access = await signAccessToken(user, row.family_id);
     const refresh = newRefreshToken();
