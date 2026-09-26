@@ -27,6 +27,14 @@ function linkDir(src, dst) {
     symlinkSync(src, dst, "dir");
   }
 }
+/** On Windows, junctions must be removed with rmdir before git worktree remove, otherwise git recursively deletes the target node_modules! */
+function unlinkDir(dst) {
+  if (platform() === "win32") {
+    spawnSync("cmd", ["/c", "rmdir", dst], { encoding: "utf8" });
+  } else {
+    rmSync(dst, { force: true });
+  }
+}
 /** Convert any backslashes to forward slashes (for vitest CLI on Windows). */
 function toSlash(p) { return p.replace(/\\/g, "/"); }
 
@@ -64,7 +72,7 @@ function vitest(cwd, testFile, label) {
   const cliArgs = ["vitest", "run", "--reporter=json", `--outputFile=${report}`];
   if (testFile) cliArgs.push(testFile);
   const started = Date.now();
-  const p = spawnSync("npx", cliArgs, { cwd, encoding: "utf8", env: { ...process.env, CI: "1" } });
+  const p = spawnSync("npx", cliArgs, { cwd, encoding: "utf8", shell: true, env: { ...process.env, CI: "1" } });
   const output = `${p.stdout ?? ""}${p.stderr ?? ""}`;
   writeFileSync(join(runDir, `${label}.txt`), output);
   let r = null;
@@ -141,6 +149,12 @@ try {
   before = vitest(join(wt, appRel), toSlash(relative(appRel, args.test)), "before");
   if (repro && reproIntact) reproBefore = vitest(join(wt, appRel), toSlash(relative(appRel, repro.path)), "repro-before");
 } finally {
+  const parts = appRel.split("/").filter((s) => s && s !== ".");
+  const dirs = ["."].concat(parts.map((_, i) => parts.slice(0, i + 1).join("/")));
+  for (const dir of dirs) {
+    const dst = join(wt, dir, "node_modules");
+    if (existsSync(dst)) unlinkDir(dst);
+  }
   git("worktree", "remove", "--force", wt);
 }
 
