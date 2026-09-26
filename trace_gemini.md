@@ -178,3 +178,39 @@ Pour s'assurer que le skill peut s'installer et s'exécuter facilement sur **n'i
 4. **Smoke Test automatisé** :
    * Validation automatique de l'exécution de Vitest et de l'adaptateur SQLite dès la fin de l'installation pour certifier la viabilité immédiate de l'environnement.
 
+---
+
+## 8. Optimisations Multi-Agents & Rigueur Scientifique (Revue Critique)
+
+Une revue critique approfondie de la chaîne d'investigation a mis en lumière 5 axes majeurs de fiabilisation, soutenus par la recherche récente en génie logiciel et agents autonomes :
+
+### 1. Visibilité des Erreurs dans les Journaux d'Exécution (`verify.mjs`)
+* **Problème** : L'option `--reporter=json` de Vitest n'affichait rien sur stdout et le rapport JSON dans le dossier temporaire `scratch` était supprimé avant que l'agent ne puisse l'analyser. `after.txt` restait quasiment vide, forçant l'agent à spéculer à l'aveugle.
+* **Résolution** : Extraction directe des messages d'échec (`assertionResults[].failureMessages` et `fullName`) injectés en clair dans `<label>.txt`.
+* **Références** :
+  * *SWE-agent (Yang et al., NeurIPS 2024)* : « Agent-Computer Interfaces » — la concision et la richesse sémantique des retours d'outils ont un impact direct mesuré sur le taux de succès des agents de réparation.
+  * *Self-Debugging (Chen et al., ICLR 2024)* : L'agent converge significativement plus vite lorsqu'il dispose du message d'assertion exact et de la trace d'échec.
+
+### 2. Reproduction Fidèle au Symptôme Réel de l'Utilisateur
+* **Problème** : Dans le code client (`demo-app/web/src/lib/apiClient.ts`), toute réponse non-200 sur `/auth/refresh` déclenche `logout()`. Un test de reproduction tolérant un statut 401 sur l'un des deux onglets accepte en réalité la condition même qui déconnecte l'utilisateur !
+* **Résolution** : Règle « Symptom-first » : le test doit rejouer le scénario complet et exiger un succès (`[200, 200]`) sur l'ensemble des requêtes concurrentes.
+* **Références** :
+  * *Qi et al. (ISSTA 2015)* & *Smith et al. (FSE 2015)* : Démontrent le piège des « correctifs plausibles mais incorrects » engendrés par des tests de reproduction trop faibles.
+  * *Agentless (Xia et al., 2024)* : Dans une chaîne lean, la qualité du test de reproduction détermine directement la justesse du correctif généré.
+
+### 3. Justification Obligatoire des Entrelacements Concurrents (Event Loop JS)
+* **Problème** : En Node.js (modèle *Run-to-Completion*), un bloc de code synchrone (ex: requêtes SQLite synchrones) ne peut jamais être interrompu. L'affirmation que deux requêtes lisent simultanément un état avant écriture était une hallucination : la suspension ne survient qu'au premier `await`.
+* **Résolution** : Toute hypothèse d'ordre ou d'entrelacement concurrent doit obligatoirement citer le fichier et le numéro de ligne du point de suspension `await` qui le rend physiquement possible.
+* **Références** :
+  * *Node.js & MDN Event Loop Specifications* : Sémantique de non-préemption du thread principal JavaScript.
+
+### 4. Réponse 200 et Émission de Jetons Valides pendant la Fenêtre de Grâce
+* **Problème** : Renvoyer 401 pendant la fenêtre de grâce de 30 secondes continue d'expulser le deuxième onglet.
+* **Résolution** : Durant la fenêtre `CONCURRENT_REFRESH_GRACE_MS`, le deuxième onglet reçoit une paire de jetons valide (statut 200), éliminant tout appel client à `logout()`.
+* **Références** :
+  * *RFC 6819 Section 5.2.2.3* & *Directives d'architecture Okta / Auth0* (Leeway window pour Refresh Token Rotation).
+
+### 5. Format de Réponse des Sous-Agents et Hygiène de Contexte
+* **Problème** : Les sous-agents de diagnostic peuvent être limités en écriture disque directe selon la configuration de l'IDE.
+* **Résolution** : Les sous-agents retournent leur objet JSON compact dans leur message de retour, et l'agent coordinateur prend la responsabilité de persister le fichier `evidence-<scope>.json` sur le disque.
+
