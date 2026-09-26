@@ -1,0 +1,50 @@
+{
+  "run_id": "20260926-0646-random-logout",
+  "runner": "vitest (json reporter)",
+  "base_ref": "c63b692f0e9719f9a5ddfa93a11b1a9f215622c1",
+  "fixed_ref": "155952d3e8cd0d42e9ea0323373049683fba9fa1",
+  "regression_test": "demo-app/api/tests/repro/random-logout-on-refresh.test.ts",
+  "verified_at": "2026-09-26T12:14:01.249Z",
+  "repro_test": null,
+  "runs": {
+    "before": {
+      "exit_code": null,
+      "duration_ms": 9,
+      "total": null,
+      "passed": null,
+      "failed": null,
+      "ran": false,
+      "log": "before.txt"
+    },
+    "after": {
+      "exit_code": null,
+      "duration_ms": 8,
+      "total": null,
+      "passed": null,
+      "failed": null,
+      "ran": false,
+      "log": "after.txt"
+    },
+    "suite": {
+      "exit_code": null,
+      "duration_ms": 6,
+      "total": null,
+      "passed": null,
+      "failed": null,
+      "ran": false,
+      "log": "suite.txt"
+    },
+    "build": {
+      "skipped": true
+    },
+    "repro_before": null,
+    "repro_after": null
+  },
+  "checks": {
+    "bug_reproduced_before_fix": false,
+    "regression_test_passes_after_fix": false,
+    "full_suite_passes": false,
+    "build_ok": true
+  },
+  "status": "NOT_VERIFIED"
+}

@@ -1,0 +1,69 @@
+{
+  "run_id": "20260926-1200-random-logout",
+  "root_cause": {
+    "title": "Non-atomic check-revoke in rotate() causes false TokenReuseDetected → revokeFamily() wipes winner's fresh token",
+    "explanation": "Two concurrent POST /auth/refresh requests arrive with the same rt cookie. Both call findByHash() synchronously (SQLite) and both read the same row with revoked_at=null before either has written. The first request proceeds: it calls revoke(row.id) then inserts a fresh token. The second request — which resumed after an await boundary in the event loop — re-reads the same token hash from the DB and now sees revoked_at IS set (written by the first request). It interprets this as token theft/reuse and calls revokeFamily(), marking the entire family as revoked. The authMiddleware then rejects the winner's valid access token with 401 because isFamilyRevoked() returns true for that family.",
+    "confidence": 0.99,
+    "causal_chain": [
+      {
+        "step": 1,
+        "scope": "trigger",
+        "evidence": ["T1", "T4"],
+        "what": "Two simultaneous POST /auth/refresh requests with identical rt cookie, no concurrency guard at the controller level."
+      },
+      {
+        "step": 2,
+        "scope": "state",
+        "evidence": ["S1", "S2"],
+        "what": "Both requests enter rotate(). Both call findByHash(sha256(oldToken)) and both read row.revoked_at=null. Both pass the reuse check (line 56)."
+      },
+      {
+        "step": 3,
+        "scope": "state",
+        "evidence": ["S5"],
+        "what": "First request calls repo.revoke(row.id) at line 60, marking the token row as revoked. It then inserts a new token and returns a fresh access token."
+      },
+      {
+        "step": 4,
+        "scope": "state",
+        "evidence": ["S2", "S3"],
+        "what": "Second request re-reads the same row (after an await boundary) and sees revoked_at IS now set. It incorrectly concludes token reuse is happening and calls revokeFamily(row.family_id), which marks token_families.revoked_at AND revokes all refresh_tokens in that family."
+      },
+      {
+        "step": 5,
+        "scope": "trigger",
+        "evidence": ["T2", "T3", "S4"],
+        "what": "authMiddleware calls isFamilyRevoked(fid) on the winner's valid access token JWT. Returns true. /me responds 401. User is logged out."
+      }
+    ],
+    "affected_files": [
+      "demo-app/api/src/services/tokenService.ts",
+      "demo-app/api/src/db/refreshTokenRepo.ts"
+    ]
+  },
+  "hypotheses": [
+    {
+      "id": "HT1",
+      "statement": "Non-atomic read-then-revoke in rotate() allows the losing concurrent request to falsely detect token reuse and call revokeFamily(), invalidating the winner's fresh access token.",
+      "status": "confirmed",
+      "evidence": ["T1", "T2", "T3", "T4", "S1", "S2", "S3", "S4", "S5"],
+      "experiments": ["repro_test"]
+    }
+  ],
+  "fix_direction": {
+    "summary": "Replace the read-check-revoke sequence in rotate() with an atomic UPDATE ... WHERE revoked_at IS NULL on the refresh_tokens row. If the UPDATE affects 0 rows, the token was already claimed by a concurrent request — treat it as InvalidToken (not TokenReuseDetected / not revokeFamily). Only call revokeFamily() when a token that was provably already revoked is presented, i.e. when findByHash finds a row with revoked_at already set at the initial read. This eliminates the false-positive reuse detection triggered by legitimate concurrent refresh.",
+    "files": [
+      "demo-app/api/src/services/tokenService.ts",
+      "demo-app/api/src/db/refreshTokenRepo.ts"
+    ],
+    "regression_test_idea": "Two concurrent POST /auth/refresh with same rt cookie → exactly one returns 200 with accessToken → GET /me with that token returns 200. Already captured in the frozen repro test."
+  },
+  "stats": {
+    "files_examined": 7,
+    "evidence_count": 9,
+    "subagents": 2,
+    "experiments": 0,
+    "started_at": "2026-09-26T12:00:00.000Z",
+    "finished_at": "2026-09-26T12:10:00.000Z"
+  }
+}

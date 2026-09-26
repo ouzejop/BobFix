@@ -1,0 +1,10 @@
+{
+  "report": "Les utilisateurs sont déconnectés aléatoirement quand ils rafraîchissent la page.",
+  "head": "d05ed9d14fc14dfbcbe8bfdbf9fe3190df038c9c",
+  "start_time": "2026-09-26T15:53:00Z",
+  "repro_test": {
+    "path": "demo-app/api/tests/repro/random-logout-on-refresh.test.ts",
+    "sha256": "b6fa90b68859ec9ea6f0814111e5cc3a6efe9d2fa8c71637dff48949e07f16f0",
+    "failing_assertion": "access token obtained from a successful /auth/refresh must not be immediately invalidated"
+  }
+}

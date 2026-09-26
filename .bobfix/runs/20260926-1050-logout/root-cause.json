@@ -1,0 +1,11 @@
+{
+  "trigger": "Concurrent POST /auth/refresh requests (e.g. two tabs reloading simultaneously with the same refresh token cookie).",
+  "state_defect": "In demo-app/api/src/services/tokenService.ts, the rotate() function revokes the old token immediately and without atomicity. When a sibling request arrives with the same token, it hits row.revoked_at != null and triggers revokeFamily(), invalidating all sessions.",
+  "root_cause_mechanism": "rotate() performs a check-then-act sequence: it checks if row.revoked_at is set, then revokes the token, and inserts the new token. In a concurrent scenario (two tabs), the second request finds the token already revoked by the first, treats it as token theft, revokes the entire family, and returns 401 Unauthorized.",
+  "affected_files": [
+    "demo-app/api/src/services/tokenService.ts",
+    "demo-app/api/src/db/refreshTokenRepo.ts"
+  ],
+  "fix_direction": "Implement atomic token claim and rotation within a single database transaction, coupled with a concurrent leeway/grace window (e.g. 30 seconds). If a request claims an already-revoked token but a live successor was created within the grace window, issue new tokens to the loser tab without revoking the token family.",
+  "regression_test_idea": "Write a test that fires two or three concurrent POST /auth/refresh requests with the same cookie and verifies that all tabs receive valid access tokens that successfully authenticate against GET /me."
+}

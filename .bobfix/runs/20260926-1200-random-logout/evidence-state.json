@@ -1,0 +1,73 @@
+{
+  "agent": "state-inspector-investigator",
+  "scope": "state — internal logic, persistence, token lifecycle, concurrency hazards",
+  "files_examined": [
+    "demo-app/api/src/services/tokenService.ts",
+    "demo-app/api/src/db/refreshTokenRepo.ts",
+    "demo-app/api/src/middleware/authMiddleware.ts",
+    "demo-app/api/src/db/migrations/001_init.sql",
+    "demo-app/api/tests/repro/random-logout-on-refresh.test.ts"
+  ],
+  "evidence": [
+    {
+      "id": "S1",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "51-71",
+      "quote": "const rotate = async (oldToken: string) => {\n    const row = repo.findByHash(sha256(oldToken));\n    if (!row || row.expires_at < Date.now() || repo.isFamilyRevoked(row.family_id)) {\n      throw new InvalidToken();\n    }\n    if (row.revoked_at) {\n      repo.revokeFamily(row.family_id);\n      throw new TokenReuseDetected();\n    }\n    repo.revoke(row.id);\n    ...\n    repo.insert({ familyId: row.family_id, ... });\n    return { access, refresh };\n  };",
+      "observation": "rotate() reads the token row then revokes it in two separate operations with no atomicity. Two concurrent calls both read row.revoked_at=null, both pass the reuse check, and the second request's revokeFamily() call sweeps the family."
+    },
+    {
+      "id": "S2",
+      "kind": "code",
+      "file": "demo-app/api/src/services/tokenService.ts",
+      "lines": "56-59",
+      "quote": "if (row.revoked_at) {\n      repo.revokeFamily(row.family_id);\n      throw new TokenReuseDetected();\n    }",
+      "observation": "The reuse check reads row.revoked_at from the in-memory snapshot captured at line 52. In a concurrent scenario, both requests snapshot the same unrevoked row. The second request (which arrives slightly later) sees the DB row as revoked (written by first's revoke at line 60) only IF the first request's DB write has already committed — which depends on event loop scheduling. The false positive triggers revokeFamily()."
+    },
+    {
+      "id": "S3",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "39-46",
+      "quote": "const revokeFamily = (familyId: string): void => {\n    db.prepare(\"UPDATE token_families SET revoked_at = ? WHERE id = ?\").run(Date.now(), familyId);\n    db.prepare(\"UPDATE refresh_tokens SET revoked_at = ? WHERE family_id = ? AND revoked_at IS NULL\").run(Date.now(), familyId);\n  };",
+      "observation": "revokeFamily() marks the token_families row AND all associated refresh_tokens as revoked. This does NOT distinguish between 'old' and 'new' tokens — it will revoke the fresh token just inserted by the winning request."
+    },
+    {
+      "id": "S4",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "48-55",
+      "quote": "const isFamilyRevoked = (familyId: string): boolean => {\n    const row = db.prepare<[string], { revoked_at: number | null }>(\n      \"SELECT revoked_at FROM token_families WHERE id = ?\"\n    ).get(familyId);\n    return row == null || row.revoked_at != null;\n  };",
+      "observation": "isFamilyRevoked reads token_families.revoked_at. After the loser calls revokeFamily(), this returns true for ANY token in that family, including the winner's fresh access token."
+    },
+    {
+      "id": "S5",
+      "kind": "code",
+      "file": "demo-app/api/src/db/refreshTokenRepo.ts",
+      "lines": "33-36",
+      "quote": "const revoke = (id: number): void => {\n    db.prepare(\"UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?\").run(Date.now(), id);\n  };",
+      "observation": "revoke() only sets revoked_at on ONE specific token row. The concurrent loser request — when it re-reads the SAME row via findByHash() — sees this revoked_at, falsely interprets it as token reuse, and calls revokeFamily()."
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "HS1",
+      "statement": "Both concurrent rotate() calls read the same token row (revoked_at=null). The first call's revoke(row.id) marks that row. The second call, using its stale in-memory snapshot, also passes the revoked_at==null check initially — but the real interleave happens at the await signAccessToken() call: after the first request's repo.revoke(row.id) the second request resumes and its own findByHash re-reads the same token hash. Actually: both requests read the snapshot simultaneously via findByHash — because SQLite is synchronous, the true interleave point is after both findByHash() calls return before either's revoke() is called.",
+      "supporting_evidence": ["S1", "S2", "S5"],
+      "confidence": 0.97
+    },
+    {
+      "id": "HS2",
+      "statement": "The root cause is the absence of an atomic check-and-revoke operation. Both requests read row.revoked_at=null from the same snapshot. One proceeds to revoke+insert. The other, reading a REFRESHED row (after await boundaries), sees revoked_at is now set and incorrectly calls revokeFamily(), permanently invalidating the entire family including the winner's fresh token.",
+      "supporting_evidence": ["S1", "S2", "S3", "S4"],
+      "confidence": 0.99
+    },
+    {
+      "id": "HS3",
+      "statement": "Fix direction: use a SQLite transaction with an UPDATE...WHERE revoked_at IS NULL (optimistic lock) to atomically claim the token. If the UPDATE affects 0 rows, the token is already revoked. This eliminates the read-then-write gap, preventing false reuse detection and spurious revokeFamily() calls.",
+      "supporting_evidence": ["S1", "S3", "S5"],
+      "confidence": 0.99
+    }
+  ]
+}

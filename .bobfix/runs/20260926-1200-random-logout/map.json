@@ -1,0 +1,16 @@
+{
+  "entrypoints": {
+    "refresh_controller": "demo-app/api/src/controllers/refreshController.ts",
+    "token_service": "demo-app/api/src/services/tokenService.ts",
+    "refresh_token_repo": "demo-app/api/src/db/refreshTokenRepo.ts",
+    "auth_middleware": "demo-app/api/src/middleware/authMiddleware.ts",
+    "db_migrations": "demo-app/api/src/db/migrations/001_init.sql"
+  },
+  "key_functions": {
+    "rotate": "demo-app/api/src/services/tokenService.ts:51",
+    "revokeFamily": "demo-app/api/src/db/refreshTokenRepo.ts:39",
+    "isFamilyRevoked": "demo-app/api/src/db/refreshTokenRepo.ts:48",
+    "revoke": "demo-app/api/src/db/refreshTokenRepo.ts:33"
+  },
+  "repro_test": "demo-app/api/tests/repro/random-logout-on-refresh.test.ts"
+}

@@ -1,0 +1,52 @@
+{
+  "agent": "trigger-tracer-investigator",
+  "scope": "trigger — entry points, concurrency, error return paths",
+  "files_examined": [
+    "demo-app/api/src/controllers/refreshController.ts",
+    "demo-app/api/src/app.ts",
+    "demo-app/api/src/middleware/authMiddleware.ts",
+    "demo-app/api/tests/repro/random-logout-on-refresh.test.ts"
+  ],
+  "evidence": [
+    {
+      "id": "T1",
+      "kind": "code",
+      "file": "demo-app/api/src/controllers/refreshController.ts",
+      "lines": "9-31",
+      "quote": "const refresh = async (req: Request, res: Response): Promise<void> => {\n    const oldToken = (req.cookies as Record<string, string>)[\"rt\"];\n    ...\n    const { access, refresh: newRefresh } = await tokenService.rotate(oldToken);",
+      "observation": "POST /auth/refresh endpoint has no concurrency guard. Two simultaneous requests with the same rt cookie both call tokenService.rotate(oldToken) without coordination."
+    },
+    {
+      "id": "T2",
+      "kind": "code",
+      "file": "demo-app/api/src/controllers/refreshController.ts",
+      "lines": "23-28",
+      "quote": "if (err instanceof InvalidToken || err instanceof TokenReuseDetected) {\n        res.clearCookie(\"rt\");\n        res.status(401).json({ error: \"Unauthorized\" });\n        return;\n      }",
+      "observation": "When the losing request hits TokenReuseDetected, it returns 401 — but revokeFamily() was ALREADY called inside rotate() before throwing, permanently invalidating the family."
+    },
+    {
+      "id": "T3",
+      "kind": "code",
+      "file": "demo-app/api/src/middleware/authMiddleware.ts",
+      "lines": "18-21",
+      "quote": "if (!fid || repo.isFamilyRevoked(fid)) {\n        res.status(401).json({ error: \"Unauthorized\" });\n        return;\n      }",
+      "observation": "authMiddleware checks isFamilyRevoked for every request. After the loser calls revokeFamily(), this check fails for the winner's valid fresh access token."
+    },
+    {
+      "id": "T4",
+      "kind": "test",
+      "file": "demo-app/api/tests/repro/random-logout-on-refresh.test.ts",
+      "lines": "44-60",
+      "quote": "const [tab1, tab2] = await Promise.all([\n      request(app).post(\"/auth/refresh\").set(\"Cookie\", rtCookie),\n      request(app).post(\"/auth/refresh\").set(\"Cookie\", rtCookie),\n    ]);\n    ...\n    expect(meRes.status).toBe(200); // ← FAILS before fix",
+      "observation": "Both tabs hit /auth/refresh simultaneously with the same rt cookie. The winner's accessToken is then rejected with 401 when calling /me."
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "HT1",
+      "statement": "Both concurrent requests enter rotate() simultaneously. The loser, detecting that the token row is revoked (written by the winner's revoke(row.id) call), calls revokeFamily() before throwing TokenReuseDetected. This sweeps the family used by the winner's freshly-issued accessToken, causing /me to return 401.",
+      "supporting_evidence": ["T1", "T2", "T3", "T4"],
+      "confidence": 0.98
+    }
+  ]
+}

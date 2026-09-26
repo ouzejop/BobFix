@@ -1,0 +1,11 @@
+{
+  "run_id": "20260926-1200-random-logout",
+  "start_time": "2026-09-26T12:00:00.000Z",
+  "git_sha": "d05ed9d0e18f77e620866b670a2e359313d82841",
+  "report": "Users are randomly logged out when they refresh the page (two-tab concurrent POST /auth/refresh with same rt cookie). One tab gets 200 + accessToken, but the token is immediately rejected by /me with 401.",
+  "repro_test": {
+    "path": "demo-app/api/tests/repro/random-logout-on-refresh.test.ts",
+    "sha256": "b6fa90b68859ec9ea6f0814111e5cc3a6efe9d2fa8c71637dff48949e07f16f0",
+    "failing_assertion": "expected 401 to be 200 — meRes.status at line 60"
+  }
+}
