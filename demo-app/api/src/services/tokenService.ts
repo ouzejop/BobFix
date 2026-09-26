@@ -54,10 +54,17 @@ export function makeTokenService(db: BetterDb) {
       throw new InvalidToken();
     }
     if (row.revoked_at) {
+      // Token was already revoked at initial read — genuine reuse by a stale token.
       repo.revokeFamily(row.family_id);
       throw new TokenReuseDetected();
     }
-    repo.revoke(row.id);
+    // Atomically claim the token. If another concurrent request already claimed it,
+    // treat it as a lost race (InvalidToken), NOT as genuine reuse — do NOT revoke
+    // the family, because the winning request's fresh token is still valid.
+    const claimed = repo.tryClaimToken(row.id);
+    if (!claimed) {
+      throw new InvalidToken();
+    }
     const user = await users.findById(row.user_id);
     const access = await signAccessToken(user, row.family_id);
     const refresh = newRefreshToken();

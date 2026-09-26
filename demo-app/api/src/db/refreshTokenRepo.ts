@@ -36,6 +36,20 @@ export function makeRefreshTokenRepo(db: BetterDb) {
     ).run(Date.now(), id);
   };
 
+  /**
+   * Atomically claim (revoke) a token only if it has not yet been revoked.
+   * Returns true if this call was the one that revoked it (i.e. 1 row affected),
+   * false if a concurrent request already revoked it.
+   */
+  const tryClaimToken = (id: number): boolean => {
+    const result = db
+      .prepare(
+        "UPDATE refresh_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL"
+      )
+      .run(Date.now(), id);
+    return result.changes === 1;
+  };
+
   const revokeFamily = (familyId: string): void => {
     db.prepare(
       "UPDATE token_families SET revoked_at = ? WHERE id = ?"
@@ -60,7 +74,7 @@ export function makeRefreshTokenRepo(db: BetterDb) {
     ).run(id, userId, Date.now());
   };
 
-  return { findByHash, insert, revoke, revokeFamily, isFamilyRevoked, createFamily };
+  return { findByHash, insert, revoke, tryClaimToken, revokeFamily, isFamilyRevoked, createFamily };
 }
 
 export type RefreshTokenRepo = ReturnType<typeof makeRefreshTokenRepo>;
