@@ -1,6 +1,6 @@
 import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 import { randomBytes, createHash } from "crypto";
-import { ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL_DAYS, JWT_SECRET, CONCURRENT_REFRESH_GRACE_MS } from "../config.js";
+import { ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL_DAYS, JWT_SECRET } from "../config.js";
 import { makeRefreshTokenRepo } from "../db/refreshTokenRepo.js";
 import { makeUserRepo, type UserRow } from "../db/userRepo.js";
 import type { BetterDb } from "../db/connection.js";
@@ -53,16 +53,11 @@ export function makeTokenService(db: BetterDb) {
     if (!row || row.expires_at < Date.now() || repo.isFamilyRevoked(row.family_id)) {
       throw new InvalidToken();
     }
-    // Rotated longer ago than the grace window: a stale token is being replayed → theft.
-    if (row.revoked_at !== null && Date.now() - row.revoked_at >= CONCURRENT_REFRESH_GRACE_MS) {
+    if (row.revoked_at) {
       repo.revokeFamily(row.family_id);
       throw new TokenReuseDetected();
     }
-    // Rotated within the grace window: a sibling request (another tab) used this token
-    // moments ago. Give this request its own pair in the same family — a 401 here makes
-    // the client log out. tryClaimToken keeps the first revocation time, so replays
-    // cannot extend the window.
-    repo.tryClaimToken(row.id);
+    repo.revoke(row.id);
     const user = await users.findById(row.user_id);
     const access = await signAccessToken(user, row.family_id);
     const refresh = newRefreshToken();
