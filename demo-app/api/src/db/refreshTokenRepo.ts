@@ -68,22 +68,13 @@ export function makeRefreshTokenRepo(db: BetterDb) {
     return row == null || row.revoked_at != null;
   };
 
-  const hasLiveToken = (familyId: string): boolean => {
-    const row = db
-      .prepare<[string], { id: number }>(
-        "SELECT id FROM refresh_tokens WHERE family_id = ? AND revoked_at IS NULL LIMIT 1"
-      )
-      .get(familyId);
-    return row != null;
-  };
-
   const createFamily = (id: string, userId: number): void => {
     db.prepare(
       "INSERT INTO token_families (id, user_id, created_at) VALUES (?, ?, ?)"
     ).run(id, userId, Date.now());
   };
 
-  return { findByHash, insert, revoke, tryClaimToken, revokeFamily, isFamilyRevoked, hasLiveToken, createFamily };
+  return { findByHash, insert, revoke, tryClaimToken, revokeFamily, isFamilyRevoked, createFamily };
 }
 
 export type RefreshTokenRepo = ReturnType<typeof makeRefreshTokenRepo>;
