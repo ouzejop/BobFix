@@ -1,0 +1,6 @@
+JSON report written to /tmp/bobfix-rRZphk/before.json
+(node:437797) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+FAIL  concurrent refresh (two tabs) every tab refreshing with the same cookie gets 200 and a usable session
+expected [ 200, 401, 401 ] to deeply equal [ 200, 200, 200 ]

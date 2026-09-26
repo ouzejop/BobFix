@@ -1,6 +1,6 @@
 import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 import { randomBytes, createHash } from "crypto";
-import { ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL_DAYS, JWT_SECRET } from "../config.js";
+import { ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL_DAYS, JWT_SECRET, CONCURRENT_REFRESH_GRACE_MS } from "../config.js";
 import { makeRefreshTokenRepo } from "../db/refreshTokenRepo.js";
 import { makeUserRepo, type UserRow } from "../db/userRepo.js";
 import type { BetterDb } from "../db/connection.js";
@@ -53,25 +53,16 @@ export function makeTokenService(db: BetterDb) {
     if (!row || row.expires_at < Date.now() || repo.isFamilyRevoked(row.family_id)) {
       throw new InvalidToken();
     }
-    if (row.revoked_at) {
-      // Distinguish a concurrent refresh race from genuine stale-token theft (RFC 6819).
-      // A token revoked within the last CONCURRENT_GRACE_MS may have been claimed by a
-      // legitimate sibling request in the same event-loop batch (two tabs reloading at
-      // the same time). Treat it as a lost race → InvalidToken, do NOT revoke the family.
-      // Outside the grace window the token was revoked long ago → genuine theft → revoke.
-      const CONCURRENT_GRACE_MS = 5_000;
-      if (Date.now() - row.revoked_at < CONCURRENT_GRACE_MS) {
-        throw new InvalidToken();
-      }
+    // Rotated longer ago than the grace window: a stale token is being replayed → theft.
+    if (row.revoked_at !== null && Date.now() - row.revoked_at >= CONCURRENT_REFRESH_GRACE_MS) {
       repo.revokeFamily(row.family_id);
       throw new TokenReuseDetected();
     }
-    // Atomically claim the token. If another concurrent request already claimed it
-    // (changes = 0), the loser throws InvalidToken without touching the family.
-    const claimed = repo.tryClaimToken(row.id);
-    if (!claimed) {
-      throw new InvalidToken();
-    }
+    // Rotated within the grace window: a sibling request (another tab) used this token
+    // moments ago. Give this request its own pair in the same family — a 401 here makes
+    // the client log out. tryClaimToken keeps the first revocation time, so replays
+    // cannot extend the window.
+    repo.tryClaimToken(row.id);
     const user = await users.findById(row.user_id);
     const access = await signAccessToken(user, row.family_id);
     const refresh = newRefreshToken();
